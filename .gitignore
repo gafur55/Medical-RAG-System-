@@ -1,2 +1,30 @@
-.venv
+# Virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Source books — copyrighted, never commit
 *.pdf
+
+# Generated pipeline output
+chunks.json
+*.jsonl
+chroma_db/
+embeddings/
+*.npy
+
+# Model cache
+.cache/
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+
+# Secrets
+.env
