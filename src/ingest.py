@@ -6,7 +6,7 @@ import pymupdf
 import re
 
 
-from config import (
+from src.config import (
     BOOKS,
     CHUNKS_PATH,
     FIGURES_DIR,
