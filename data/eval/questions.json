@@ -1,0 +1,17 @@
+[
+  {"id": 1,  "type": "site",      "question": "Reconstruction options for a 1.5 cm defect of the nasal ala"},
+  {"id": 2,  "type": "site",      "question": "Repair of a full-thickness lower lip defect involving more than one-third of the lip"},
+  {"id": 3,  "type": "site",      "question": "Reconstruction of a helical rim defect of the ear"},
+  {"id": 4,  "type": "site",      "question": "Options for a medial cheek defect near the nasolabial fold"},
+  {"id": 5,  "type": "site",      "question": "Repair of a lower eyelid defect involving the lid margin"},
+  {"id": 6,  "type": "site",      "question": "Reconstruction of a large scalp defect with exposed calvarium"},
+  {"id": 7,  "type": "technique", "question": "When is a bilobed flap indicated and how is it designed?"},
+  {"id": 8,  "type": "technique", "question": "Indications and technique for the Karapandzic flap"},
+  {"id": 9,  "type": "technique", "question": "When to choose a full-thickness skin graft over a split-thickness graft"},
+  {"id": 10, "type": "technique", "question": "Donor site options for a full-thickness skin graft on the face"},
+  {"id": 11, "type": "decision",  "question": "When is healing by secondary intention preferable to flap reconstruction?"},
+  {"id": 12, "type": "decision",  "question": "How does defect depth change the choice of reconstruction?"},
+  {"id": 13, "type": "decision",  "question": "What anatomic danger zones must be considered when undermining the lateral face?"},
+  {"id": 14, "type": "out_of_scope", "question": "What chemotherapy regimen is used for metastatic melanoma?"},
+  {"id": 15, "type": "out_of_scope", "question": "What are the diagnostic criteria for type 2 diabetes?"}
+]

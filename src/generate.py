@@ -12,7 +12,7 @@ with open(CHUNKS_PATH) as f:
 vectors = np.load(PROCESSED_DIR / "vectors.npy")
 model = SentenceTransformer(EMBEDDING_MODEL)
 
-question = "how do I reconstruct a defect on the chin?"
+question = "Reconstruction options for a 1.5 cm defect of the nasal ala"
 
 q_vector = model.encode(question)
 scores = model.similarity(q_vector, vectors)[0].numpy()
@@ -22,9 +22,6 @@ context = ""
 for i in top:
     context += f"[Page {chunks[i]['page']}]\n{chunks[i]['text']}\n\n"
 
-
-print(context)
-print()
 
 prompt = f"""You are assisting a Mohs surgeon with reconstruction planning.
 

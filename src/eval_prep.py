@@ -27,9 +27,9 @@ for q in questions:
 
     for rank, i in enumerate(top, start=1):
         page = chunks[i]["page"]
-        text = chunks[i]["text"][:400]
+        text = chunks[i]["text"]
         lines.append(f"[ ]  {rank}. **Page {page}** (score {scores[i]:.3f})")
-        lines.append(f"> {text}...\n")
+        lines.append(f"> {text}\n")
 
     lines.append("**Anything important missing?**\n")
     lines.append("---\n")
