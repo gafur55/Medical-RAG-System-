@@ -30,3 +30,7 @@ embeddings/
 .env
 
 figures/
+
+__pycache__/
+*.pyc
+data/raw/
