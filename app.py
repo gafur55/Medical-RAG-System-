@@ -19,13 +19,23 @@ afterwards.
 
 import json
 from datetime import datetime, timezone
-import spaces
+
 import gradio as gr
 
 from src import config
 from src.generate import answer
+from src.storage import append_record, load_records, update_record
 
-SESSIONS_PATH = config.EVAL_DIR / "sessions.jsonl"
+try:
+    import spaces
+except ImportError:
+    class spaces:  # local fallback - the decorator does nothing
+        @staticmethod
+        def GPU(*args, **kwargs):
+            return lambda f: f
+
+
+
 
 GRADES = [
     "Correct and complete - I would act on this",
@@ -50,34 +60,6 @@ pages. **Do not enter patient-identifying information.**
 """
 
 
-# ----------------------------------------------------------------- storage
-def append_record(record):
-    SESSIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(SESSIONS_PATH, "a") as f:
-        f.write(json.dumps(record) + "\n")
-
-
-def load_records():
-    if not SESSIONS_PATH.exists():
-        return []
-    return [json.loads(l) for l in SESSIONS_PATH.read_text().splitlines() if l.strip()]
-
-
-def update_record(record_id, updates):
-    """Rewrite the file with one record changed.
-
-    Fine at this scale. If it ever gets slow, that is the signal to move to a
-    real database, not to optimize this.
-    """
-    records = load_records()
-    for r in records:
-        if r["id"] == record_id:
-            r.update(updates)
-    with open(SESSIONS_PATH, "w") as f:
-        for r in records:
-            f.write(json.dumps(r) + "\n")
-
-
 def gold_pages_for(question_text):
     """Known-correct pages, if this question is in our eval set.
 
@@ -96,8 +78,13 @@ def valid_name(name):
     return len((name or "").strip().split()) >= 2
 
 
-# --------------------------------------------------------------- ask tab
 @spaces.GPU(duration=1)
+def _unused_gpu_stub():
+    """Never called. ZeroGPU refuses to start without at least one decorated
+    function, but our generation happens at Groq, so nothing here needs a GPU."""
+    return None
+
+# --------------------------------------------------------------- ask tab
 def ask(question, name):
     if not valid_name(name):
         return "Enter your full name at the top before asking.", "", [], ""
@@ -148,9 +135,9 @@ def ask(question, name):
 def next_ungraded():
     """Load the next answer waiting for a grade, and clear the form.
 
-    Returns 7 values: the three display panels, the record id, and blank
-    values for the two radios and the comment box. Clearing matters - a
-    leftover selection could be saved again without the grader noticing.
+    Returns 7 values: three display panels, the record id, then blanks for
+    the two radios and the comment box. Clearing matters - a leftover
+    selection could be saved again without the grader noticing.
     """
     records = load_records()
     ungraded = [r for r in records if not r.get("grade")]
@@ -173,8 +160,8 @@ def next_ungraded():
 def save_grade(record_id, grade, citation_check, comment, name):
     """Save, then load the next one with a blank form.
 
-    Error paths keep whatever the grader typed, so a missing name does not
-    throw away their comment.
+    Error paths return what the grader already typed, so a missing name does
+    not throw away their comment.
     """
     if not record_id:
         return "Nothing to grade.", "", "", None, grade, citation_check, comment
@@ -193,6 +180,7 @@ def save_grade(record_id, grade, citation_check, comment, name):
         "graded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })
     return next_ungraded()
+
 
 # ----------------------------------------------------------- summary tab
 def summary():
@@ -241,11 +229,6 @@ def summary():
     lines.append(f"\n_Sample size: {len(records)}. Enough to spot obvious breakage, "
                  "not enough to establish a safety rate._")
     return "\n".join(lines)
-
-
-def export_sessions():
-    """Free Spaces have no permanent disk. Download before you finish."""
-    return str(SESSIONS_PATH) if SESSIONS_PATH.exists() else None
 
 
 # --------------------------------------------------------------------- UI
@@ -302,7 +285,7 @@ THEME = gr.themes.Base(
 PLACEHOLDER_ANSWER = "_Ask a question. The answer will appear here._"
 PLACEHOLDER_PASSAGES = "_The passages sent to the model will be listed here._"
 
-with gr.Blocks(title="Mohs reconstruction reference", theme=THEME, css=CSS) as demo:
+with gr.Blocks(title="Mohs reconstruction reference") as demo:
     gr.Markdown(DISCLAIMER)
 
     name = gr.Textbox(
@@ -353,43 +336,32 @@ with gr.Blocks(title="Mohs reconstruction reference", theme=THEME, css=CSS) as d
 
         with gr.Row():
             save_btn = gr.Button("Save grade", variant="primary")
-            load_btn = gr.Button("Load next")
+            load_btn = gr.Button("Load next answer to grade")
 
+        GRADE_OUTPUTS = [grade_header, grade_answer, grade_pages, current_id,
+                         grade_choice, citation_choice, comment]
 
         save_btn.click(
             save_grade,
             inputs=[current_id, grade_choice, citation_choice, comment, name],
-            outputs=[grade_header, grade_answer, grade_pages, current_id,
-                     grade_choice, citation_choice, comment],
+            outputs=GRADE_OUTPUTS,
         )
-        load_btn.click(
-            next_ungraded,
-            outputs=[grade_header, grade_answer, grade_pages, current_id,
-                     grade_choice, citation_choice, comment],
-        )
-        demo.load(
-            next_ungraded,
-            outputs=[grade_header, grade_answer, grade_pages, current_id,
-                     grade_choice, citation_choice, comment],
-        )
+        load_btn.click(next_ungraded, outputs=GRADE_OUTPUTS)
+        demo.load(next_ungraded, outputs=GRADE_OUTPUTS)
 
     with gr.Tab("Summary"):
         summary_md = gr.Markdown(elem_id="summary_panel")
-        with gr.Row():
-            refresh_btn = gr.Button("Refresh")
-            
-        gr.Markdown("_Download before closing. The server does not keep files "
-                    "permanently._")
+        refresh_btn = gr.Button("Refresh")
 
         refresh_btn.click(summary, outputs=summary_md)
-        
         demo.load(summary, outputs=summary_md)
+
+    # Asking a question creates a record to grade, so refresh that tab too.
+    # Gradio does not re-run the page the way Streamlit does, so a second
+    # handler on the same button is how the other tab learns something
+    # changed. Wired here, after both tabs exist.
+    ask_btn.click(next_ungraded, outputs=GRADE_OUTPUTS)
 
 
 if __name__ == "__main__":
-    demo.launch()
-
-
-
-
-
+    demo.launch(theme=THEME, css=CSS)

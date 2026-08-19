@@ -23,7 +23,7 @@ def get_model():
     global _model
     if _model is None:
         from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer(config.EMBEDDING_MODEL)
+        _model = SentenceTransformer(config.EMBEDDING_MODEL, device="cpu")
     return _model
 
 

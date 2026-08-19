@@ -10,11 +10,9 @@ __pycache__/
 *.pdf
 
 # Generated pipeline output
-chunks.json
 *.jsonl
 chroma_db/
 embeddings/
-*.npy
 
 # Model cache
 .cache/
