@@ -11,14 +11,21 @@ import sys
 from src import config
 from src.retrieve import search
 import re
+from dotenv import load_dotenv
+import os
+from groq import Groq
+load_dotenv()
 
 
+client = Groq(api_key=os.environ["GROQ_API_KEY"])
 PROMPT = """You are assisting a Mohs surgeon with reconstruction planning.
 
 Answer the question using ONLY the textbook excerpts below.
 Cite the page number for every claim, like this: (p. 384).
 If the excerpts do not contain the answer, say so plainly and stop.
 Do not use outside knowledge. Do not guess.
+Cite the page number for every claim using round brackets exactly like this: (p. 384).
+Do not use any other bracket style.
 
 EXCERPTS:
 {context}
@@ -50,16 +57,16 @@ def answer(question, k=None):
         return {"text": "Nothing retrieved.", "citations": [],
                 "retrieved_ids": [], "retrieved": [], "figures": []}
 
-    import ollama
-    response = ollama.chat(
-        model=config.LLM_MODEL,
+    
+    completion = client.chat.completions.create(
+        model="openai/gpt-oss-120b",
         messages=[{"role": "user",
                    "content": PROMPT.format(context=build_context(hits),
                                             question=question)}],
     )
+    text = completion.choices[0].message.content
 
-    text = response["message"]["content"]
-    cited = sorted({int(p) for p in re.findall(r"\(p\.\s*(\d+)\)", text)})
+    cited = sorted({int(p) for p in re.findall(r"p\.\s*(\d+)", text)})
     figures = []
     for h in hits:
         for path in h["chunk"].get("figure_paths", []):
