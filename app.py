@@ -1,45 +1,53 @@
-"""Surgeon-facing app: ask questions, grade answers.
+"""Surgeon-facing app: ask questions, grade answers. Gradio version.
 
-Run from the repo root:
-    streamlit run app.py
+Run locally:
+    python app.py
 
-Two jobs:
-  Ask   - type a question, get an answer with citations and figures.
-          Every answer is saved immediately.
-  Grade - go through unrated answers and score them.
+On HuggingFace Spaces this file is the entry point automatically.
 
-Everything is written to data/eval/sessions.jsonl. The important field is
+Three jobs:
+  Ask     - question in, answer with citations and figures out.
+  Grade   - go through unrated answers and score them.
+  Summary - counts, plus whether failures came from search or the model.
+
+Everything lands in data/eval/sessions.jsonl. The field that matters is
 retrieved_pages: when an answer is graded badly, that tells you whether a
-correct page was even in the context. Retrieval failure and generation
-failure need completely different fixes, and this is the only way to tell
-them apart after the fact.
+correct page was even in the context. Retrieval failures and generation
+failures need different fixes, and this is the only way to tell them apart
+afterwards.
 """
-
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
-import streamlit as st
+import spaces
+import gradio as gr
+
 from src import config
 from src.generate import answer
 
-
-
 SESSIONS_PATH = config.EVAL_DIR / "sessions.jsonl"
 
-GRADES = {
-    "correct_complete": "Correct and complete — I would act on this",
-    "correct_incomplete": "Correct but incomplete — missing an option I would consider",
-    "misleading": "Misleading — sourced, but creates the wrong impression",
-    "harmful": "Potentially harmful — could lead to a bad decision",
-}
+GRADES = [
+    "Correct and complete - I would act on this",
+    "Correct but incomplete - missing an option I would consider",
+    "Misleading - sourced, but creates the wrong impression",
+    "Potentially harmful - could lead to a bad decision",
+]
 
-CITATIONS = {
-    "all_support": "Every citation supports what it is attached to",
-    "some_wrong": "At least one citation does not support its claim",
-    "uncited": "Claims made with no citation at all",
-    "none": "No citations given",
-}
+CITATION_CHECKS = [
+    "Every citation supports what it is attached to",
+    "At least one citation does not support its claim",
+    "Claims made with no citation at all",
+    "No citations given",
+]
+
+DISCLAIMER = """
+### Mohs reconstruction reference
+
+Searches one textbook and answers only from what it finds.
+A reference tool, not clinical advice - verify every answer against the cited
+pages. **Do not enter patient-identifying information.**
+"""
 
 
 # ----------------------------------------------------------------- storage
@@ -52,14 +60,14 @@ def append_record(record):
 def load_records():
     if not SESSIONS_PATH.exists():
         return []
-    return [json.loads(line) for line in SESSIONS_PATH.read_text().splitlines() if line.strip()]
+    return [json.loads(l) for l in SESSIONS_PATH.read_text().splitlines() if l.strip()]
 
 
 def update_record(record_id, updates):
     """Rewrite the file with one record changed.
 
-    Fine at this scale (tens of records). If it ever gets slow, that is the
-    signal to move to a real database, not to optimize this.
+    Fine at this scale. If it ever gets slow, that is the signal to move to a
+    real database, not to optimize this.
     """
     records = load_records()
     for r in records:
@@ -71,10 +79,10 @@ def update_record(record_id, updates):
 
 
 def gold_pages_for(question_text):
-    """If this question is in our eval set, return its known-correct pages.
+    """Known-correct pages, if this question is in our eval set.
 
-    Free-text questions the surgeon invents will not match, and that is
-    expected - those become new eval questions later.
+    Questions the surgeon invents will not match, and that is expected -
+    those become new eval questions later.
     """
     if not config.QUESTIONS_PATH.exists():
         return None
@@ -84,187 +92,304 @@ def gold_pages_for(question_text):
     return None
 
 
-# --------------------------------------------------------------------- UI
-st.set_page_config(page_title="Mohs reconstruction reference", layout="wide")
-
-st.title("Mohs reconstruction reference")
-st.caption(
-    "Searches one textbook and answers only from what it finds. "
-    "A reference tool, not clinical advice — verify every answer against the "
-    "cited pages. Do not enter patient-identifying information."
-)
-
-
-grader = st.sidebar.text_input("Your full name", value="")
-st.sidebar.caption("Recorded with every question and grade.")
-
-# Nothing below runs until a name is entered. st.stop() halts the script
-# here, so the tabs are never drawn.
-if len(grader.strip().split()) < 2:
-    st.info("Enter your full name in the sidebar to begin.")
-    st.stop()
-
-ask_tab, grade_tab, summary_tab = st.tabs(["Ask", "Grade", "Summary"])
+def valid_name(name):
+    return len((name or "").strip().split()) >= 2
 
 
 # --------------------------------------------------------------- ask tab
-with ask_tab:
-    question = st.text_area(
-        "Question",
-        placeholder="Reconstruction options for a 1.5 cm defect of the nasal ala",
-        height=80,
-    )
+@spaces.GPU(duration=1)
+def ask(question, name):
+    if not valid_name(name):
+        return "Enter your full name at the top before asking.", "", [], ""
 
-    if st.button("Ask", type="primary") and question.strip():
-        with st.spinner("Searching the textbook..."):
-            result = answer(question.strip())
+    if not (question or "").strip():
+        return "Type a question first.", "", [], ""
 
-        record = {
-            "id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"),
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "asked_by": grader,
-            "question": result["question"],
-            "answer": result["text"],
-            "citations": result["citations"],
-            "retrieved_ids": result["retrieved_ids"],
-            "retrieved_pages": result["retrieved_pages"],
-            "figures": result["figures"],
-            "config": result["config"],
-            "grade": None,
-        }
-        append_record(record)
-        st.session_state["last"] = record
-        st.session_state["last_hits"] = result["retrieved"]
+    result = answer(question.strip())
 
-    if "last" in st.session_state:
-        rec = st.session_state["last"]
+    record = {
+        "id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"),
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "asked_by": name.strip(),
+        "question": result["question"],
+        "answer": result["text"],
+        "citations": result["citations"],
+        "retrieved_ids": result["retrieved_ids"],
+        "retrieved_pages": result["retrieved_pages"],
+        "figures": result["figures"],
+        "config": result["config"],
+        "grade": None,
+    }
+    append_record(record)
 
-        st.markdown("### Answer")
-        st.write(rec["answer"])
+    if result["citations"]:
+        cites = "**Cited pages:** " + ", ".join(f"p{p}" for p in result["citations"])
+    else:
+        cites = "**No page citations in this answer.** Treat it with extra caution."
 
-        if rec["citations"]:
-            st.markdown("**Cited pages:** " + ", ".join(f"p{p}" for p in rec["citations"]))
-        else:
-            st.warning("No page citations in this answer. Treat it with extra caution.")
+    images = []
+    for path in result["figures"]:
+        full = config.ROOT / path
+        if full.exists():
+            images.append(str(full))
 
-        for path in rec["figures"]:
-            full = config.ROOT / path
-            if full.exists():
-                st.image(str(full), caption=Path(path).stem, width=520)
+    passages = ("### What the model was shown\n"
+                "_These passages went into the prompt. The answer should come "
+                "from here._\n\n")
+    for hit in result["retrieved"]:
+        c = hit["chunk"]
+        passages += (f"**{hit['rank']}. Page {c['page']} - {c['kind']} - "
+                     f"score {hit['score']:.3f}**\n\n> {c['text']}\n\n")
 
-        st.markdown("### What the model was shown")
-        st.caption("These passages went into the prompt. The answer should come from here.")
-        for hit in st.session_state.get("last_hits", []):
-            c = hit["chunk"]
-            label = f"{hit['rank']}. Page {c['page']} · {c['kind']} · score {hit['score']:.3f}"
-            with st.expander(label):
-                st.write(c["text"])
-
-        st.info("Answer saved. Score it in the Grade tab.")
+    return result["text"], cites, images, passages
 
 
 # ------------------------------------------------------------- grade tab
-with grade_tab:
+def next_ungraded():
+    """Load the next answer waiting for a grade, and clear the form.
+
+    Returns 7 values: the three display panels, the record id, and blank
+    values for the two radios and the comment box. Clearing matters - a
+    leftover selection could be saved again without the grader noticing.
+    """
     records = load_records()
     ungraded = [r for r in records if not r.get("grade")]
-
-    st.markdown(f"**{len(ungraded)} waiting** · {len(records) - len(ungraded)} already graded")
+    graded = len(records) - len(ungraded)
 
     if not ungraded:
-        st.success("Nothing left to grade.")
-    else:
-        rec = ungraded[0]
+        return (f"**Nothing left to grade.** {graded} done.",
+                "", "", None, None, None, "")
 
-        st.markdown(f"### {rec['question']}")
-        st.write(rec["answer"])
+    rec = ungraded[0]
+    header = (f"**{len(ungraded)} waiting** - {graded} already graded\n\n"
+              f"### {rec['question']}")
+    pages = "Retrieved pages: " + ", ".join(f"p{p}" for p in rec["retrieved_pages"])
+    if rec["citations"]:
+        pages += "  |  Cited: " + ", ".join(f"p{p}" for p in rec["citations"])
 
-        if rec["citations"]:
-            st.caption("Cited: " + ", ".join(f"p{p}" for p in rec["citations"]))
+    return header, rec["answer"], pages, rec["id"], None, None, ""
 
-        with st.expander("Passages the model was given"):
-            st.write("Pages: " + ", ".join(f"p{p}" for p in rec["retrieved_pages"]))
 
-        with st.form("grade_form"):
-            grade = st.radio(
-                "How good is this answer?",
-                options=list(GRADES),
-                format_func=lambda k: GRADES[k],
-            )
-            citation_check = st.radio(
-                "Citations",
-                options=list(CITATIONS),
-                format_func=lambda k: CITATIONS[k],
-            )
-            missing = st.text_area(
-                "What is missing or wrong?",
-                placeholder="Which option would you have included? What is stated incorrectly?",
-                height=90,
-            )
-            submitted = st.form_submit_button("Save grade", type="primary")
+def save_grade(record_id, grade, citation_check, comment, name):
+    """Save, then load the next one with a blank form.
 
-        if submitted:
-            update_record(rec["id"], {
-                "grade": grade,
-                "citation_check": citation_check,
-                "comment": missing,
-                "graded_by": grader,
-                "graded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            })
-            st.rerun()
+    Error paths keep whatever the grader typed, so a missing name does not
+    throw away their comment.
+    """
+    if not record_id:
+        return "Nothing to grade.", "", "", None, grade, citation_check, comment
+    if not valid_name(name):
+        return ("**Enter your full name at the top first.**", "", "",
+                record_id, grade, citation_check, comment)
+    if not grade:
+        return ("**Pick a grade first.**", "", "",
+                record_id, grade, citation_check, comment)
 
+    update_record(record_id, {
+        "grade": grade,
+        "citation_check": citation_check,
+        "comment": comment,
+        "graded_by": name.strip(),
+        "graded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    })
+    return next_ungraded()
 
 # ----------------------------------------------------------- summary tab
-with summary_tab:
+def summary():
     records = [r for r in load_records() if r.get("grade")]
-
     if not records:
-        st.info("No grades yet.")
-    else:
-        st.markdown(f"**{len(records)} graded answers**")
+        return "No grades yet."
 
-        counts = {}
-        for r in records:
-            counts[r["grade"]] = counts.get(r["grade"], 0) + 1
-        for key, label in GRADES.items():
-            n = counts.get(key, 0)
-            st.write(f"- {label}: **{n}**")
+    lines = [f"**{len(records)} graded answers**\n"]
+    for label in GRADES:
+        n = sum(1 for r in records if r["grade"] == label)
+        lines.append(f"- {label}: **{n}**")
 
-        harmful = counts.get("harmful", 0)
-        if harmful:
-            st.error(f"{harmful} answer(s) graded potentially harmful. "
+    harmful = sum(1 for r in records if r["grade"].startswith("Potentially harmful"))
+    if harmful:
+        lines.append(f"\n**{harmful} answer(s) graded potentially harmful.** "
                      "Fix these before anyone else uses the system.")
 
-        # The triage that makes the grades actionable: for each bad answer,
-        # was a known-correct page even in the context?
-        st.markdown("### Where the failures came from")
-        st.caption(
-            "For answers graded worse than 'correct and complete': if no correct "
-            "page was retrieved, search is at fault. If one was, the prompt or "
-            "model is at fault. Only works for questions in our eval set."
+    # The triage that makes grades actionable: for each bad answer, was a
+    # known-correct page even in the context?
+    retrieval_fault = generation_fault = 0
+    new_questions = []
+    for r in records:
+        if r["grade"].startswith("Correct and complete"):
+            continue
+        gold = gold_pages_for(r["question"])
+        if gold is None:
+            new_questions.append(r["question"])
+        elif any(p in gold for p in r["retrieved_pages"]):
+            generation_fault += 1
+        else:
+            retrieval_fault += 1
+
+    lines.append("\n### Where the failures came from")
+    lines.append("_If no correct page was retrieved, search is at fault. If one "
+                 "was there and the answer was still poor, the prompt or model "
+                 "is at fault._\n")
+    lines.append(f"- Search never found a correct page: **{retrieval_fault}**")
+    lines.append(f"- Correct page was there, answer still poor: **{generation_fault}**")
+    lines.append(f"- New question, not in the eval set: **{len(new_questions)}**")
+
+    if new_questions:
+        lines.append("\n**Worth adding to questions.json:**")
+        for q in new_questions:
+            lines.append(f"- {q}")
+
+    lines.append(f"\n_Sample size: {len(records)}. Enough to spot obvious breakage, "
+                 "not enough to establish a safety rate._")
+    return "\n".join(lines)
+
+
+def export_sessions():
+    """Free Spaces have no permanent disk. Download before you finish."""
+    return str(SESSIONS_PATH) if SESSIONS_PATH.exists() else None
+
+
+# --------------------------------------------------------------------- UI
+# Layout stability: every output panel has a fixed min-height and is seeded
+# with placeholder text. Empty Markdown components collapse to zero height,
+# so filling them shoves everything below down the page. Reserving the space
+# up front means clicking a button changes text, not layout.
+CSS = """
+/* Colors come from the Gradio theme, never hardcoded - otherwise dark mode
+   renders dark text on dark panels. Only typography and spacing here. */
+
+.gradio-container {
+  max-width: 820px !important;
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
+}
+
+/* Comfortable reading defaults, ChatGPT-ish. */
+.gradio-container p,
+.gradio-container li {
+  font-size: 16px !important;
+  line-height: 1.75 !important;
+}
+
+.gradio-container h1 { font-size: 22px !important; margin: 18px 0 8px !important; }
+.gradio-container h2 { font-size: 19px !important; margin: 22px 0 8px !important; }
+.gradio-container h3 { font-size: 17px !important; margin: 20px 0 8px !important; }
+
+.gradio-container li { margin-bottom: 8px !important; }
+.gradio-container ol, .gradio-container ul { padding-left: 22px !important; }
+
+/* Layout stability: empty Markdown collapses to zero height, so filling it
+   shoves everything below down the page. Reserve the space up front. */
+#answer_panel  { min-height: 260px; padding: 4px 2px; }
+#cites_panel   { min-height: 30px; font-size: 14px !important; opacity: 0.75; }
+#grade_header  { min-height: 90px; }
+#grade_answer  { min-height: 280px; padding: 4px 2px; }
+#grade_pages   { min-height: 28px; font-size: 14px !important; opacity: 0.75; }
+#summary_panel { min-height: 360px; }
+
+/* Retrieved passages are reference material to scan, not prose to read. */
+#passages_panel blockquote {
+  font-size: 14px !important;
+  line-height: 1.65 !important;
+  opacity: 0.85;
+  margin: 6px 0 16px !important;
+}
+"""
+
+THEME = gr.themes.Base(
+    primary_hue=gr.themes.colors.slate,
+    neutral_hue=gr.themes.colors.gray,
+)
+
+PLACEHOLDER_ANSWER = "_Ask a question. The answer will appear here._"
+PLACEHOLDER_PASSAGES = "_The passages sent to the model will be listed here._"
+
+with gr.Blocks(title="Mohs reconstruction reference", theme=THEME, css=CSS) as demo:
+    gr.Markdown(DISCLAIMER)
+
+    name = gr.Textbox(
+        label="Your full name",
+        placeholder="First and last name - recorded with every question and grade",
+    )
+
+    with gr.Tab("Ask"):
+        question = gr.Textbox(
+            label="Question",
+            placeholder="Reconstruction options for a 1.5 cm defect of the nasal ala",
+            lines=3,
+        )
+        ask_btn = gr.Button("Ask", variant="primary")
+
+        citations_md = gr.Markdown("_No question asked yet._", elem_id="cites_panel")
+        answer_md = gr.Markdown(PLACEHOLDER_ANSWER, elem_id="answer_panel")
+
+        # Collapsed by default so they never push the answer off screen.
+        with gr.Accordion("Figures from the book", open=False):
+            figures_gallery = gr.Gallery(show_label=False, columns=2, height=420)
+
+        with gr.Accordion("Passages the model was shown", open=False):
+            passages_md = gr.Markdown(PLACEHOLDER_PASSAGES, elem_id="passages_panel")
+
+        ask_btn.click(
+            ask,
+            inputs=[question, name],
+            outputs=[answer_md, citations_md, figures_gallery, passages_md],
         )
 
-        retrieval_fault, generation_fault, unknown = [], [], []
-        for r in records:
-            if r["grade"] == "correct_complete":
-                continue
-            gold = gold_pages_for(r["question"])
-            if gold is None:
-                unknown.append(r)
-            elif any(p in gold for p in r["retrieved_pages"]):
-                generation_fault.append(r)
-            else:
-                retrieval_fault.append(r)
+    with gr.Tab("Grade"):
+        current_id = gr.State(None)
 
-        st.write(f"- Search never found a correct page: **{len(retrieval_fault)}**")
-        st.write(f"- Correct page was there, answer still poor: **{len(generation_fault)}**")
-        st.write(f"- New question, not in the eval set: **{len(unknown)}**")
+        grade_header = gr.Markdown(elem_id="grade_header")
+        grade_answer = gr.Markdown(elem_id="grade_answer")
+        grade_pages = gr.Markdown(elem_id="grade_pages")
 
-        if unknown:
-            with st.expander(f"{len(unknown)} new questions worth adding to questions.json"):
-                for r in unknown:
-                    st.write(f"- {r['question']}")
+        with gr.Row():
+            grade_choice = gr.Radio(GRADES, label="How good is this answer?")
+            citation_choice = gr.Radio(CITATION_CHECKS, label="Citations")
 
-        st.caption(
-            f"Sample size: {len(records)}. Enough to spot obvious breakage, "
-            "not enough to establish a safety rate."
+        comment = gr.Textbox(
+            label="What is missing or wrong?",
+            placeholder="Which option would you have included? What is stated incorrectly?",
+            lines=3,
         )
+
+        with gr.Row():
+            save_btn = gr.Button("Save grade", variant="primary")
+            load_btn = gr.Button("Load next")
+
+
+        save_btn.click(
+            save_grade,
+            inputs=[current_id, grade_choice, citation_choice, comment, name],
+            outputs=[grade_header, grade_answer, grade_pages, current_id,
+                     grade_choice, citation_choice, comment],
+        )
+        load_btn.click(
+            next_ungraded,
+            outputs=[grade_header, grade_answer, grade_pages, current_id,
+                     grade_choice, citation_choice, comment],
+        )
+        demo.load(
+            next_ungraded,
+            outputs=[grade_header, grade_answer, grade_pages, current_id,
+                     grade_choice, citation_choice, comment],
+        )
+
+    with gr.Tab("Summary"):
+        summary_md = gr.Markdown(elem_id="summary_panel")
+        with gr.Row():
+            refresh_btn = gr.Button("Refresh")
+            
+        gr.Markdown("_Download before closing. The server does not keep files "
+                    "permanently._")
+
+        refresh_btn.click(summary, outputs=summary_md)
+        
+        demo.load(summary, outputs=summary_md)
+
+
+if __name__ == "__main__":
+    demo.launch()
+
+
+
+
+

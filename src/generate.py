@@ -24,8 +24,9 @@ Answer the question using ONLY the textbook excerpts below.
 Cite the page number for every claim, like this: (p. 384).
 If the excerpts do not contain the answer, say so plainly and stop.
 Do not use outside knowledge. Do not guess.
-Cite the page number for every claim using round brackets exactly like this: (p. 384).
-Do not use any other bracket style.
+Cite pages using exactly this format: (p. 384)
+Do not use square brackets. Do not write the word "Page".
+Every sentence containing a clinical claim must end with a citation.
 
 EXCERPTS:
 {context}
@@ -66,7 +67,10 @@ def answer(question, k=None):
     )
     text = completion.choices[0].message.content
 
-    cited = sorted({int(p) for p in re.findall(r"p\.\s*(\d+)", text)})
+    cited = sorted({
+        int(p) for p in re.findall(r"(?:p\.|[Pp]age)\s*(\d+)", text)
+    })
+
     figures = []
     for h in hits:
         for path in h["chunk"].get("figure_paths", []):
