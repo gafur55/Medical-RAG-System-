@@ -30,7 +30,7 @@ TOP_K = 5
 REVIEW_POOL = 25
 
 # generation
-LLM_MODEL = "qwen2.5:7b"
+LLM_MODEL = "openai/gpt-oss-120b"   # Groq model id, read by generate.py
 
 
 def run_config():
@@ -40,4 +40,5 @@ def run_config():
         "retrieve_kinds": list(RETRIEVE_KINDS),
         "min_chunk_chars": MIN_CHUNK_CHARS,
         "top_k": TOP_K,
+        "llm_model": LLM_MODEL,
     }
