@@ -194,3 +194,215 @@ work, and we spent about ten minutes finding out instead of guessing.
 
 ---
 
+## Experiment C — retrieval knobs sweep (2026-10-13)
+
+**What we changed:** nothing in `config.py`. Three new search settings were
+added to `retrieve.search()`, all **off by default**, and compared side by
+side with `python3 -m src.sweep` — every configuration in one process, the
+model loaded once. These runs were *not* logged to `results.jsonl`; run
+`python3 -m src.sweep --log` to add them (each line gets the note
+`sweep: <name>` and the settings it actually used).
+
+**The three settings, in plain words:**
+
+- **Front matter excluded** (`EXCLUDE_FRONT_MATTER`): never show chapter
+  abstracts, keyword lists, chapter "this chapter covers…" overviews, the
+  book index, the contributor list, the copyright pages or the list of
+  videos. Experiment B pointed at exactly these.
+- **Max per page** (`MAX_PER_PAGE`): at most 1 (or 2) results from the same
+  page, so one page cannot fill the five slots.
+- **Hybrid** (`HYBRID_WEIGHT`): mix a keyword score (BM25 — rewards passages
+  that contain the question's rare words, like *Karapandzic*) into the
+  embedding score. The number is how much say the keyword score gets.
+- **top_k** is not a new setting: it is how many results the language model
+  is shown. It does not change the ranking, only where it is cut, so for those
+  rows read **r@k** and **p@k** — recall and precision at that k.
+
+### First, a safety check
+
+Before comparing anything: with every setting at its default, does search
+still return exactly what it did before this change? Yes. For all 15
+questions, the top 25 chunk IDs, their order and their scores (to 6 decimal
+places) are identical to a capture taken before the code changed, and all
+13 `score_one()` results are identical. Passing the "off" values explicitly
+(`exclude_front_matter=False, max_per_page=0, hybrid_weight=0`) gives the
+same. So the app the doctor is reviewing is unaffected until someone flips
+a setting.
+
+### Results
+
+| run | r@1 | r@5 | p@5 | mrr | k | r@k | p@k | Δmrr |
+|---|---|---|---|---|---|---|---|---|
+| baseline | 0.615 | 0.923 | 0.477 | 0.746 | 5 | 0.923 | 0.477 | +0.000 |
+| **front matter excluded** | **0.692** | **1.000** | **0.554** | **0.810** | 5 | 1.000 | 0.554 | **+0.064** |
+| max 1 per page | 0.615 | 0.923 | 0.492 | 0.756 | 5 | 0.923 | 0.492 | +0.010 |
+| max 2 per page | 0.615 | 0.923 | 0.492 | 0.750 | 5 | 0.923 | 0.492 | +0.004 |
+| hybrid 0.1 | 0.615 | 0.923 | 0.492 | 0.750 | 5 | 0.923 | 0.492 | +0.004 |
+| hybrid 0.2 | 0.692 | 0.923 | 0.523 | 0.763 | 5 | 0.923 | 0.523 | +0.017 |
+| hybrid 0.3 | 0.615 | 0.923 | 0.523 | 0.724 | 5 | 0.923 | 0.523 | -0.022 |
+| hybrid 0.5 | 0.538 | 0.846 | 0.492 | 0.664 | 5 | 0.846 | 0.492 | -0.082 |
+| top_k 3 | 0.615 | 0.923 | 0.477 | 0.746 | 3 | 0.846 | 0.513 | +0.000 |
+| top_k 8 | 0.615 | 0.923 | 0.477 | 0.746 | 8 | 1.000 | 0.510 | +0.000 |
+| front matter + max 1 | 0.692 | 1.000 | 0.523 | 0.810 | 5 | 1.000 | 0.523 | +0.064 |
+| front matter + max 2 | 0.692 | 1.000 | 0.554 | 0.810 | 5 | 1.000 | 0.554 | +0.064 |
+| front matter + hybrid 0.1 | 0.692 | 1.000 | 0.554 | 0.823 | 5 | 1.000 | 0.554 | +0.077 |
+| front matter + hybrid 0.2 | 0.692 | 1.000 | 0.569 | 0.791 | 5 | 1.000 | 0.569 | +0.045 |
+| front matter + hybrid 0.3 | 0.615 | 0.923 | 0.569 | 0.746 | 5 | 0.923 | 0.569 | +0.000 |
+| front matter + max 1 + hybrid 0.2 | 0.692 | 1.000 | 0.523 | 0.791 | 5 | 1.000 | 0.523 | +0.045 |
+| front matter + top_k 3 | 0.692 | 1.000 | 0.554 | 0.810 | 3 | 0.923 | 0.564 | +0.064 |
+| front matter + top_k 8 | 0.692 | 1.000 | 0.554 | 0.810 | 8 | 1.000 | 0.548 | +0.064 |
+
+Remember the scale: one question is 0.077 of recall or MRR, and one result
+slot is 0.015 of precision@5 (65 slots in total).
+
+### What the front-matter filter removes
+
+97 of the 1491 chunks: 42 of the 64 chunks on pages 2–36 (title page,
+copyright and disclaimer, foreword, acknowledgements, contributor list),
+all 32 chunks of the index (pages 587–606), and 23 chunks that introduce a
+chapter rather than teach (abstracts, keyword lists, "this chapter focuses
+on…" overviews — one of them the chapter-11 summary on p. 534 — and the
+chapter author line on p. 101). We checked every one of the 97 against the
+answer key: **none** of them is a chunk the gold labels count as correct for
+any question.
+
+Two things it keeps on purpose. Chapter **key points** (the bullet lists right
+after an abstract) stay, because the key points on p. 102 are a correct
+answer for Q13. And sentences that merely *mention* the chapter ("beyond the
+scope of this chapter", "previously discussed in this chapter") stay,
+because pages 283 and 530 say that and are correct answers.
+
+### What moved, question by question
+
+**Front matter excluded** — five questions improved, none got worse:
+
+- **Q1** (nasal ala, the worst question in the baseline). Result 1 was the
+  nose chapter's abstract (p. 133, "Herein, the authors begin by
+  presenting a review of nasal anatomy…"). With it gone, p. 530 moves from
+  position 6 to 5, so Q1 finally has a correct passage in the top 5. The
+  rest of its top 5 is still combination-repair case figures (pp. 511, 518) —
+  Q1 is not fixed, just less broken.
+- **Q2** (lower lip). Position 3 was p. 23, the e-book's list of videos
+  ("Video 8.1: Repair of a large cutaneous lateral upper lip defect…"). Gone;
+  all 5 results are now correct.
+- **Q3** (helical rim). The ear chapter's abstract (position 1) and keyword
+  list (position 3), both p. 286, are gone. First correct result moves from
+  position 5 to 3, and 3 of 5 results are correct instead of 1. The p. 286
+  key points list is still at position 1 (see above for why it stays).
+- **Q6** (scalp). Position 1 was the scalp chapter's abstract (p. 220). This
+  one has no giveaway words; it is caught only because it sits directly above
+  the chapter's keyword list. First correct result moves from 3 to 2.
+- **Q12** (defect depth). Position 1 was the opening of the combination
+  chapter (p. 495, "The majority of this book has focused on…") and
+  position 4 the p. 220 scalp abstract. With both gone the correct p. 119
+  passage is now first.
+
+The two out-of-scope questions are not scored, but the change helps them
+too: Q15 (diabetes) had a contributor's name and title as its top result,
+and Q14 (melanoma chemotherapy) had the perioperative chapter's abstract and
+the preface in its top 6. A model asked to refuse is better off refusing
+over body text than over a list of names.
+
+**Max per page** — Q3 improves (the three p. 286 chunks collapse to one),
+but Q8 gets worse: p. 378, the Karapandzic page, holds three correct
+passages and a cap of 1 throws two away. Net: one result slot, i.e. noise.
+On top of the front-matter filter, a cap of 2 changes nothing and a cap of 1
+costs Q2 and Q8 a correct passage each.
+
+**Hybrid** — helps exactly where expected and hurts where it should be
+expected too:
+
+- Gains: **Q8** (all 5 results become correct — "Karapandzic" is a rare
+  word only the right pages contain), **Q6** (the scalp-flap figure p. 526
+  moves to position 1), **Q1**, **Q3**, **Q9**.
+- Losses: **Q12** drops its only correct result out of the top 5. The
+  question's words are "defect", "depth", "change", "choice",
+  "reconstruction". The correct p. 119 passage says "defects",
+  "reconstructing", "superficial", "deep" — the keyword score does not stem
+  words, so it sees only one match, while the scalp-algorithm page (p. 231)
+  literally contains "choice" and "defect" and jumps to position 1. Also
+  **Q4** (first correct result 2 → 4) and **Q13** (one correct result
+  pushed out).
+- The keyword score *likes* front matter: abstracts and keyword lists repeat
+  every topic word of their chapter. For Q3 the p. 286 abstract gets the
+  maximum possible hybrid score. That is why hybrid looks better combined
+  with the front-matter filter than alone.
+- More weight is worse: at 0.5 recall@1, recall@5 and MRR all fall below
+  the baseline.
+
+**top_k** — the ranking is the same, only the cut moves. At k = 3 the model
+would miss a correct passage for Q1 and Q3 (recall 0.846); at k = 8 every
+question has one (recall 1.000), and precision barely moves (0.513,
+0.477 and 0.510 at k = 3, 5 and 8). With the front-matter filter, k = 3 misses only Q1.
+This is a trade-off for answer quality (more context vs. more distraction),
+which retrieval metrics alone cannot settle.
+
+### How the keyword score is combined, and why
+
+Three ways to combine the embedding score and the keyword score were tried
+(not part of the sweep; same 13 questions, no front-matter filter):
+
+| combination | weight | r@1 | r@5 | p@5 | mrr |
+|---|---|---|---|---|---|
+| embeddings only (baseline) | — | 0.615 | 0.923 | 0.477 | 0.746 |
+| keywords only (BM25) | — | 0.385 | 0.846 | 0.400 | 0.550 |
+| both scaled to 0–1, then mixed (**shipped**) | 0.1 | 0.615 | 0.923 | 0.492 | 0.750 |
+| | 0.2 | 0.692 | 0.923 | 0.523 | 0.763 |
+| | 0.3 | 0.615 | 0.923 | 0.523 | 0.724 |
+| raw embedding score + scaled keyword score | 0.1 | 0.692 | 0.923 | 0.523 | 0.761 |
+| | 0.2 | 0.538 | 0.846 | 0.508 | 0.681 |
+| | 0.3 | 0.538 | 0.846 | 0.508 | 0.656 |
+| reciprocal rank fusion (k = 60) | 0.1 | 0.615 | 0.923 | 0.523 | 0.727 |
+| | 0.2 | 0.538 | 1.000 | 0.523 | 0.678 |
+| | 0.3 | 0.538 | 1.000 | 0.538 | 0.688 |
+
+The raw-score version at 0.1 behaves like the shipped one at 0.2 and then
+collapses: embedding scores for the top results differ by a few hundredths,
+so even a small keyword weight takes over. Scaling both sides makes the
+weight mean what it says. Reciprocal rank fusion bought a little precision at
+the cost of MRR. Keywords alone are clearly worse than embeddings alone.
+See `docs/retrieve.md` for the reasoning and the reference.
+
+### How much to believe this
+
+- **13 questions.** A change in one question moves recall or MRR by 0.077.
+  Max per page and hybrid 0.1 are one-question changes: noise. Hybrid 0.2
+  is several questions going *both* ways (five up, three down): not a
+  result. Only the front-matter filter moves all four metrics the same way,
+  through five different questions, with no question getting worse — and
+  each removed chunk is, on reading, obviously not an answer.
+- **We looked at these questions while writing the filter.** Experiment B
+  told us p. 286 was the problem, and the rules were checked against this
+  book. They describe general things (abstracts, keyword lists, indexes,
+  copyright pages) rather than specific pages, but the test is not
+  independent of the design. New questions are the real check.
+- **Unreviewed passages count as wrong.** The answer key came from ticking
+  the baseline's top 25 per question. A setting that brings up passages
+  nobody reviewed could be under-scored. Checked: the front-matter filter
+  brings no unreviewed passage into any top 5; hybrid 0.2 brings one (Q12,
+  p. 428, eyelid repair options — not an answer to Q12 anyway).
+- Front matter + hybrid 0.1 has the best MRR (0.823), but its difference
+  from the front-matter filter alone is +0.013 — one question's rank. Not a
+  reason to add a second moving part.
+
+### Recommendation (for the doctor and the project owner to decide)
+
+1. **Turn on `EXCLUDE_FRONT_MATTER`.** The only change in this sweep that
+   improves every metric, for several questions, without hurting any. It
+   removes text with no clinical content, so the risk to answers is low. If
+   the doctor agrees, it is a one-line change in `config.py`; then run
+   `python3 -m src.score --note "front matter excluded"` and check the logged
+   config says `"exclude_front_matter": true`.
+2. **Leave `MAX_PER_PAGE` off.** Good pages often hold several right
+   passages.
+3. **Leave `HYBRID_WEIGHT` at 0 for now.** Its gains and losses cancel on the
+   textbook. Revisit when guidelines and protocols with exact terms (drug
+   names, codes, policy names) are indexed, and try word stemming first —
+   Q12 shows the keyword score losing to "defects" vs "defect".
+4. **Keep `TOP_K` at 5** until answers, not just retrieval, are graded at 3
+   and 8.
+
+None of these defaults were changed. `config.py` still describes the
+behaviour the doctor is reviewing.
+
+---
