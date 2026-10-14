@@ -38,3 +38,7 @@ figures/
 __pycache__/
 *.pyc
 data/raw/
+
+# Nightly status reports (src/report.py): they quote grader comments and
+# answer excerpts, so they stay on this machine
+data/eval/reports/
