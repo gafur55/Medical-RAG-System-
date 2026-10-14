@@ -52,7 +52,10 @@ def test_classify():
     check("lowercase fig", classify("fig. 9 the flap"), "caption")
 
     check("References header", classify("References [1] Burget GC"), "reference")
-    check("journal name", classify("Zitelli JA. J Am Acad Dermatol. 1983"), "reference")
+    # classify() recognises references by the structural "[N] Surname" marker,
+    # not by journal names (see test_classify_known_gap for what that misses)
+    check("numbered reference",
+          classify("[12] Zitelli JA. J Am Acad Dermatol. 1983"), "reference")
 
     check("ordinary prose", classify("The nasal ala is a free margin"), "prose")
     # Must NOT fire just because the word appears mid-sentence
@@ -63,15 +66,22 @@ def test_classify():
 def test_classify_known_gap():
     """Documents a failure we measured, so it is visible rather than lurking.
 
-    PDF extraction eats the space in 'Dermatol Surg' on some pages. The
-    journal-name whitelist misses those. Swapping in a structural pattern
-    (r'\\[\\d+\\]\\s+[A-Z][a-z]+') fixes it.
+    The journal-name whitelist was replaced by the structural pattern
+    r'\\[\\d+\\]\\s+[A-Z][a-z]+', which fixed mangled names such as
+    'DermatolSurg' when the entry starts with its [N] marker. A reference
+    block that has lost its marker (a continuation line, or an unnumbered
+    citation) still falls through to prose. Informational only - it prints
+    instead of failing, so closing the gap is a visible event.
     """
-    mangled = "prospective, randomized study. DermatolSurg. 2016; 42 (11):1248"
-    if classify(mangled) == "reference":
-        print("  NOTE classify now catches mangled journal names - gap closed")
-    else:
-        print("  KNOWN GAP classify misses 'DermatolSurg' (space eaten by PDF)")
+    unmarked = [
+        "prospective, randomized study. DermatolSurg. 2016; 42 (11):1248",
+        "Zitelli JA. J Am Acad Dermatol. 1983",
+    ]
+    for text in unmarked:
+        if classify(text) == "reference":
+            print(f"  NOTE gap closed for: {text[:40]}...")
+        else:
+            print(f"  KNOWN GAP unmarked reference read as prose: {text[:40]}...")
 
 
 # --------------------------------------------- nearest_figure_above

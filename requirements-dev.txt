@@ -1,0 +1,12 @@
+# Everything needed offline: ingestion, embedding, evaluation and tests.
+# The HF Space only installs requirements.txt.
+#
+#   pip install -r requirements-dev.txt
+#   python3 -m pytest
+
+-r requirements.txt
+pymupdf>=1.24
+pyyaml>=6.0
+beautifulsoup4>=4.12
+python-docx>=1.1
+pytest>=8.0

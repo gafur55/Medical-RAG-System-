@@ -17,6 +17,12 @@ embeddings/
 # Model cache
 .cache/
 
+# Local copies of embedding models, e.g. models/bge-small-en-v1.5
+models/
+
+# Test cache
+.pytest_cache/
+
 # macOS
 .DS_Store
 
