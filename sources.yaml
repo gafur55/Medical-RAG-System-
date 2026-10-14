@@ -1,0 +1,261 @@
+# Every document the Mohs RAG system can search.
+#
+# ingest.py indexes the entries with `enabled: true`, and nothing else gets
+# indexed. Every entry has to state its license, so adding a source is a
+# deliberate act (see src/sources.py and docs/sources.md).
+#
+# Fields
+#   id       lowercase letters, digits, underscores. Stored on every chunk.
+#   title    full title
+#   label    short name shown in citations, e.g. "[2] StatPearls: Mohs AUC"
+#   type     textbook | guideline | review | policy | protocol | article
+#   domain   clinical | operations - retrieval and the app can filter on it
+#   format   pdf_textbook | pdf | html | nxml | docx | markdown - picks the loader
+#   path     file location, relative to the project root. data/raw/ is gitignored.
+#   license  terms of use, in words
+#   url      where the file came from
+#   year     publication or last-update year
+#   enabled  true to index it
+#   notes    how to get it, caveats
+#   options  loader settings (rarely needed; see src/loaders.py)
+#
+# After editing:   python3 -m src.ingest && python3 -m src.embed
+# Status check:    python3 -m src.ingest --list
+#
+# Not listed on purpose:
+#   NCCN Guidelines - the NCCN license explicitly bars using its content as
+#     input to any AI system (nccn.org/end-user-license-agreement).
+#   2012 Mohs AUC (AAD/ACMS/ASDSA/ASMS) - copyrighted. Index it only with the
+#     AAD's permission; until then the StatPearls AUC article below covers it.
+#
+# Licenses below were checked on 2026-10-13. Re-check each page before
+# enabling an entry - this is a starting point, not legal advice.
+
+sources:
+
+  # --------------------------------------------------------------- textbook
+  - id: mohs_layers
+    title: "Mohs Micrographic Surgery: From Layers to Reconstruction"
+    label: "Mohs textbook"
+    type: textbook
+    domain: clinical
+    format: pdf_textbook
+    path: data/raw/MOHS_MICROGRAPHIC_SURGERY_from_layers_to_reconstruction.pdf
+    license: "Copyrighted. Licensed copy for local use - never commit the PDF or publish its text."
+    enabled: true
+
+  # ------------------------------------------------------------- StatPearls
+  # Mohs series on NCBI Bookshelf. CC BY-NC-ND 4.0: non-commercial use,
+  # credit the authors, no altered versions - quote, do not rewrite.
+  # Getting the files: save each page by hand (browser File > Save Page As,
+  # "Webpage, HTML only") into data/raw/statpearls/. Bookshelf forbids
+  # scripted bulk downloads from the website; the only allowed bulk route is
+  # the NLM LitArch FTP (ftp.ncbi.nlm.nih.gov/pub/litarch/ - look the NBK ids
+  # up in file_list.csv). If you get the .nxml files that way, change
+  # `format: nxml` and the path's extension.
+
+  - id: statpearls_mohs
+    title: "Mohs Micrographic Surgery (StatPearls)"
+    label: "StatPearls: Mohs surgery"
+    type: review
+    domain: clinical
+    format: html
+    path: data/raw/statpearls/NBK441833.html
+    url: https://www.ncbi.nlm.nih.gov/books/NBK441833/
+    license: "CC BY-NC-ND 4.0"
+    enabled: false
+
+  - id: statpearls_mohs_auc
+    title: "Mohs Micrographic Surgery Appropriate Use Criteria (AUC) Guidelines (StatPearls)"
+    label: "StatPearls: Mohs AUC"
+    type: review
+    domain: clinical
+    format: html
+    path: data/raw/statpearls/NBK603719.html
+    url: https://www.ncbi.nlm.nih.gov/books/NBK603719/
+    license: "CC BY-NC-ND 4.0"
+    enabled: false
+    notes: "Covers the 2012 AUC that several Medicare contractors' LCDs adopt."
+
+  - id: statpearls_mohs_periop
+    title: "Mohs Micrographic Surgery Safe and Effective Perioperative Care (StatPearls)"
+    label: "StatPearls: Mohs perioperative care"
+    type: review
+    domain: clinical
+    format: html
+    path: data/raw/statpearls/NBK611989.html
+    url: https://www.ncbi.nlm.nih.gov/books/NBK611989/
+    license: "CC BY-NC-ND 4.0"
+    enabled: false
+
+  - id: statpearls_mohs_complications
+    title: "Mohs Micrographic Surgery Surgical Complication Management (StatPearls)"
+    label: "StatPearls: Mohs complications"
+    type: review
+    domain: clinical
+    format: html
+    path: data/raw/statpearls/NBK603734.html
+    url: https://www.ncbi.nlm.nih.gov/books/NBK603734/
+    license: "CC BY-NC-ND 4.0"
+    enabled: false
+
+  - id: statpearls_mohs_cryostat
+    title: "Mohs Micrographic Surgery Section of Specimens Using Cryostat, Stain, and Immunostain (StatPearls)"
+    label: "StatPearls: Mohs cryostat and staining"
+    type: review
+    domain: clinical
+    format: html
+    path: data/raw/statpearls/NBK607998.html
+    url: https://www.ncbi.nlm.nih.gov/books/NBK607998/
+    license: "CC BY-NC-ND 4.0"
+    enabled: false
+
+  - id: statpearls_mohs_mapping
+    title: "Mohs Micrographic Surgery Mapping Techniques (StatPearls)"
+    label: "StatPearls: Mohs mapping"
+    type: review
+    domain: clinical
+    format: html
+    path: data/raw/statpearls/NBK603713.html
+    url: https://www.ncbi.nlm.nih.gov/books/NBK603713/
+    license: "CC BY-NC-ND 4.0"
+    enabled: false
+
+  - id: statpearls_mohs_melanoma
+    title: "Mohs Micrographic Surgery Management of Melanoma and Melanoma In Situ (StatPearls)"
+    label: "StatPearls: Mohs for melanoma"
+    type: review
+    domain: clinical
+    format: html
+    path: data/raw/statpearls/NBK606123.html
+    url: https://www.ncbi.nlm.nih.gov/books/NBK606123/
+    license: "CC BY-NC-ND 4.0"
+    enabled: false
+
+  - id: statpearls_mohs_closure
+    title: "Mohs Micrographic Surgery Design and Execution of Intermediate and Complex Closure (StatPearls)"
+    label: "StatPearls: Mohs closures"
+    type: review
+    domain: clinical
+    format: html
+    path: data/raw/statpearls/NBK603714.html
+    url: https://www.ncbi.nlm.nih.gov/books/NBK603714/
+    license: "CC BY-NC-ND 4.0"
+    enabled: false
+    notes: "Also explains the CPT criteria for intermediate vs complex repair."
+
+  - id: statpearls_mohs_second_intention
+    title: "Mohs Micrographic Surgery: Design and Execution of Secondary Intention (StatPearls)"
+    label: "StatPearls: second intention"
+    type: review
+    domain: clinical
+    format: html
+    path: data/raw/statpearls/NBK617058.html
+    url: https://www.ncbi.nlm.nih.gov/books/NBK617058/
+    license: "CC BY-NC-ND 4.0"
+    enabled: false
+
+  - id: statpearls_mohs_nmsc
+    title: "Mohs Micrographic Surgery: Evaluation and Treatment of Nonmelanoma Skin Cancer (StatPearls)"
+    label: "StatPearls: NMSC evaluation and treatment"
+    type: review
+    domain: clinical
+    format: html
+    path: data/raw/statpearls/NBK617060.html
+    url: https://www.ncbi.nlm.nih.gov/books/NBK617060/
+    license: "CC BY-NC-ND 4.0"
+    enabled: false
+
+  - id: statpearls_mohs_tunneled_flaps
+    title: "Mohs Micrographic Surgery: Design and Execution of Tunneled Flaps (StatPearls)"
+    label: "StatPearls: tunneled flaps"
+    type: review
+    domain: clinical
+    format: html
+    path: data/raw/statpearls/NBK613295.html
+    url: https://www.ncbi.nlm.nih.gov/books/NBK613295/
+    license: "CC BY-NC-ND 4.0"
+    enabled: false
+
+  # --------------------------------------------------------- Medicare (CMS)
+  # US government works, public domain - but CPT code descriptions inside
+  # them are AMA-copyrighted. Coverage rules differ by Medicare contractor.
+
+  - id: cms_ncci_ch3_2026
+    title: "Medicare NCCI Policy Manual, Chapter III - Surgery: Integumentary System (2026)"
+    label: "NCCI manual ch. III (2026)"
+    type: policy
+    domain: operations
+    format: pdf
+    path: data/raw/cms/ncci_ch3_2026.pdf
+    url: https://www.cms.gov/files/document/03-chapter3-ncci-medicare-policy-manual-2026-final.pdf
+    license: "US government work (public domain). CPT descriptors are AMA-copyrighted."
+    year: 2026
+    enabled: false
+    notes: >-
+      Mohs bundling rules: what 17311-17315 include, when a same-day
+      diagnostic biopsy is separately reportable, repairs billed separately.
+      CMS publishes a new edition every January.
+
+  - id: cms_lcd_mohs
+    title: "Mohs Micrographic Surgery - Local Coverage Determination (your Medicare contractor)"
+    label: "Medicare LCD: Mohs"
+    type: policy
+    domain: operations
+    format: html
+    path: data/raw/cms/lcd_mohs.html
+    url: https://www.cms.gov/medicare-coverage-database/search.aspx
+    license: "US government work (public domain). CPT descriptors are AMA-copyrighted."
+    enabled: false
+    notes: >-
+      Search the Medicare Coverage Database for "Mohs Micrographic Surgery"
+      and pick your contractor's LCD. Examples: L33689 (First Coast),
+      L34961 (Novitas), L35494, L35702 / L35704 (Noridian JE / JF). I could
+      not confirm one for NGS (J6, includes Illinois). Save the page as HTML.
+
+  - id: cms_billing_mohs
+    title: "Billing and Coding: Mohs Micrographic Surgery (your Medicare contractor)"
+    label: "Medicare billing article: Mohs"
+    type: policy
+    domain: operations
+    format: html
+    path: data/raw/cms/billing_mohs.html
+    url: https://www.cms.gov/medicare-coverage-database/search.aspx
+    license: "US government work (public domain). CPT descriptors are AMA-copyrighted."
+    enabled: false
+    options:
+      skip_tables: true
+    notes: >-
+      The billing and coding article that goes with your LCD (e.g. A57767
+      for L33689, A57477 for L35494). Its long ICD-10 tables are skipped
+      (skip_tables) - they bury the prose rules in search results.
+
+  # ---------------------------------------------------------------- NCI PDQ
+  - id: pdq_skin_cancer_treatment_hp
+    title: "Skin Cancer Treatment (PDQ) - Health Professional Version"
+    label: "NCI PDQ: Skin cancer treatment"
+    type: review
+    domain: clinical
+    format: html
+    path: data/raw/nci/skin-treatment-pdq-hp.html
+    url: https://www.cancer.gov/types/skin/hp/skin-treatment-pdq
+    license: >-
+      NCI text is free of copyright - credit the National Cancer Institute.
+      Images are not reusable. Excerpts may not be presented as an official
+      PDQ summary.
+    enabled: false
+    notes: "BCC and cSCC treatment options, staging, risk factors. Updated several times a year."
+
+  # --------------------------------------------------------- clinic documents
+  # Your own protocols. Keep them in data/raw/protocols/ (gitignored), never
+  # in the repo, and never index anything containing patient information.
+  - id: clinic_protocols_example
+    title: "Clinic protocol (example entry)"
+    label: "Clinic protocol"
+    type: protocol
+    domain: operations
+    format: docx
+    path: data/raw/protocols/example.docx
+    license: "Internal - clinic use only. Never commit."
+    enabled: false
+    notes: "Copy this entry once per document. format: markdown also works for .md / .txt files."
