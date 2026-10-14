@@ -14,7 +14,13 @@ Everything lands in data/eval/sessions.jsonl. The field that matters is
 retrieved_pages: when an answer is graded badly, that tells you whether a
 correct page was even in the context. Retrieval failures and generation
 failures need different fixes, and this is the only way to tell them apart
-afterwards.
+afterwards. retrieved_sources says which document each of those pages is
+from, once more than the textbook is indexed.
+
+Which sources are indexed comes from data/processed/manifest.json (via
+config.index_manifest()), never from sources.yaml: the Space installs only
+requirements.txt, so nothing here may need PyYAML, bs4, docx or PyMuPDF.
+With only the textbook indexed, every panel reads exactly as it always did.
 """
 
 import json
@@ -24,7 +30,7 @@ from datetime import datetime, timezone
 import gradio as gr
 
 from src import config
-from src.generate import answer
+from src.generate import answer, chunk_locator, chunk_source, describe, format_cited
 from src.storage import append_record, real_records, update_record
 
 try:
@@ -52,17 +58,63 @@ CITATION_CHECKS = [
     "No citations given",
 ]
 
-DISCLAIMER = """
+DISCLAIMER_TEMPLATE = """
 ### Mohs reconstruction reference
 
-Searches one textbook and answers only from what it finds.
+{sources} and answers only from what it finds.
 A reference tool, not clinical advice - verify every answer against the cited
 pages. **Do not enter patient-identifying information.**
 """
 
+# sources.yaml "domain" -> what the Ask tab's filter calls it.
+DOMAIN_LABELS = {
+    "clinical": "Clinical",
+    "operations": "Operations - coding, billing, policy",
+}
 
-def gold_pages_for(question_text):
-    """Known-correct pages, if this question is in our eval set.
+
+def indexed_sources():
+    """The manifest's source entries. [] before ingest.py has written one -
+    which means the index is the textbook alone, as it always was."""
+    return config.index_manifest().get("sources", [])
+
+
+def sources_sentence(sources):
+    """"Searches one textbook", or "Searches 3 sources: Mohs textbook, ..."."""
+    if not sources or [s["id"] for s in sources] == [config.DEFAULT_SOURCE]:
+        return "Searches one textbook"
+    labels = [s.get("label") or s["id"] for s in sources]
+    if len(labels) == 1:
+        return f"Searches one source: {labels[0]}"
+    return f"Searches {len(labels)} sources: {', '.join(labels)}"
+
+
+def disclaimer():
+    return DISCLAIMER_TEMPLATE.format(sources=sources_sentence(indexed_sources()))
+
+
+DISCLAIMER = disclaimer()
+
+
+def indexed_domains():
+    """Domains present in the index, clinical first. No manifest: the
+    textbook alone, so clinical only."""
+    present = {s.get("domain", "clinical") for s in indexed_sources()} or {"clinical"}
+    return ([d for d in DOMAIN_LABELS if d in present]
+            + sorted(present - set(DOMAIN_LABELS)))
+
+
+def domain_choices():
+    """(label, value) pairs for the "Search in" filter, or [] when there is
+    nothing to choose between - one domain means no filter on screen."""
+    domains = indexed_domains()
+    if len(domains) < 2:
+        return []
+    return [(DOMAIN_LABELS.get(d, d.capitalize()), d) for d in domains]
+
+
+def gold_question(question_text):
+    """This question's entry in the eval set, or None.
 
     Questions the surgeon invents will not match, and that is expected -
     those become new eval questions later.
@@ -71,8 +123,21 @@ def gold_pages_for(question_text):
         return None
     for q in json.loads(config.QUESTIONS_PATH.read_text()):
         if q["question"].strip().lower() == question_text.strip().lower():
-            return q.get("gold_pages", [])
+            return q
     return None
+
+
+def pages_from(rec, source):
+    """The retrieved pages of a record that belong to `source`.
+
+    Gold pages are pages of one document (the textbook unless the question
+    says otherwise), so page 12 of a policy manual must not count as a hit
+    for textbook page 12. Records from before the multi-source index have
+    no retrieved_sources: all their pages are textbook pages.
+    """
+    pages = rec.get("retrieved_pages") or []
+    sources = rec.get("retrieved_sources") or [config.DEFAULT_SOURCE] * len(pages)
+    return [p for p, s in zip(pages, sources) if s == source and p is not None]
 
 
 def valid_name(name):
@@ -86,16 +151,68 @@ def _unused_gpu_stub():
     return None
 
 # --------------------------------------------------------------- ask tab
-def ask(question, name, test_mode=False):
+def citation_style(result_or_record):
+    """"page" or "numbered". Answers from before numbered citations existed
+    carry no style, and they are all page style."""
+    return (result_or_record.get("citation_style")
+            or (result_or_record.get("config") or {}).get("citation_style")
+            or "page")
+
+
+def citations_line(result):
+    """The line above the answer. Page style is the original wording."""
+    if citation_style(result) == "numbered":
+        if result.get("cited_sources"):
+            return "**Cited sources:** " + format_cited(result["cited_sources"])
+        return "**No citations in this answer.** Treat it with extra caution."
+    if result["citations"]:
+        return "**Cited pages:** " + ", ".join(f"p{p}" for p in result["citations"])
+    return "**No page citations in this answer.** Treat it with extra caution."
+
+
+def passage_title(n, hit, style, labels):
+    """"1. Page 145" for a textbook chunk in page style - the original. A
+    chunk from another source names its document; numbered style uses the
+    excerpt number the answer cites, "[1] Mohs textbook, p. 145"."""
+    c = hit["chunk"]
+    if style == "page" and chunk_source(c) == config.DEFAULT_SOURCE:
+        return f"{hit['rank']}. Page {c['page']}"
+    source = chunk_source(c)
+    where = describe(labels.get(source, source), c.get("page"), chunk_locator(c))
+    return f"[{n}] {where}" if style == "numbered" else f"{hit['rank']}. {where}"
+
+
+def passages_panel(result, labels):
+    style = citation_style(result)
+    passages = ("### What the model was shown\n"
+                "_These passages went into the prompt. The answer should come "
+                "from here._\n\n")
+    for n, hit in enumerate(result["retrieved"], start=1):
+        c = hit["chunk"]
+        passages += (f"**{passage_title(n, hit, style, labels)} - {c['kind']} - "
+                     f"score {hit['score']:.3f}**\n\n> {c['text']}\n\n")
+    return passages
+
+
+def ask(question, name, test_mode=False, domains=None):
     """test_mode: the record is saved with is_test=True, so it never reaches
-    the Grade queue or the Summary numbers."""
+    the Grade queue or the Summary numbers.
+
+    domains: the "Search in" selection, e.g. ["clinical"]. None when the
+    filter is not shown (one domain indexed) - search then uses
+    config.RETRIEVE_DOMAINS, exactly as before the filter existed.
+    """
     if not valid_name(name):
         return "Enter your full name at the top before asking.", "", [], ""
 
     if not (question or "").strip():
         return "Type a question first.", "", [], ""
 
-    result = answer(question.strip())
+    if domains is not None and not list(domains):
+        return "Pick at least one place to search under **Search in**.", "", [], ""
+
+    domains = list(domains) if domains is not None else None
+    result = answer(question.strip(), domains=domains)
 
     record = {
         "id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"),
@@ -106,6 +223,10 @@ def ask(question, name, test_mode=False):
         "citations": result["citations"],
         "retrieved_ids": result["retrieved_ids"],
         "retrieved_pages": result["retrieved_pages"],
+        "retrieved_sources": result.get("retrieved_sources", []),
+        "cited_sources": result.get("cited_sources", []),
+        "domains": domains,
+        "citation_style": citation_style(result),
         "figures": result["figures"],
         "config": result["config"],
         "grade": None,
@@ -113,29 +234,47 @@ def ask(question, name, test_mode=False):
     }
     append_record(record)
 
-    if result["citations"]:
-        cites = "**Cited pages:** " + ", ".join(f"p{p}" for p in result["citations"])
-    else:
-        cites = "**No page citations in this answer.** Treat it with extra caution."
-
     images = []
     for path in result["figures"]:
         full = config.ROOT / path
         if full.exists():
             images.append(str(full))
 
-    passages = ("### What the model was shown\n"
-                "_These passages went into the prompt. The answer should come "
-                "from here._\n\n")
-    for hit in result["retrieved"]:
-        c = hit["chunk"]
-        passages += (f"**{hit['rank']}. Page {c['page']} - {c['kind']} - "
-                     f"score {hit['score']:.3f}**\n\n> {c['text']}\n\n")
-
-    return result["text"], cites, images, passages
+    passages = passages_panel(result, config.source_labels())
+    return result["text"], citations_line(result), images, passages
 
 
 # ------------------------------------------------------------- grade tab
+def pages_line(rec, labels=None):
+    """What was retrieved and cited, under the answer being graded.
+
+    A textbook-only record reads exactly as before: "Retrieved pages: p12,
+    p40  |  Cited: p12". Other sources are named, since "p12" alone no
+    longer says which document; one without pages shows just its label.
+    """
+    pages = rec.get("retrieved_pages") or []
+    sources = rec.get("retrieved_sources") or [config.DEFAULT_SOURCE] * len(pages)
+    if any(s != config.DEFAULT_SOURCE for s in sources) or None in pages:
+        labels = labels if labels is not None else config.source_labels()
+        items = []
+        for p, s in zip(pages, sources):
+            if s == config.DEFAULT_SOURCE and p is not None:
+                items.append(f"p{p}")
+            else:
+                label = labels.get(s, s)
+                items.append(f"{label} p{p}" if p is not None else label)
+        line = "Retrieved: " + ", ".join(items)
+    else:
+        line = "Retrieved pages: " + ", ".join(f"p{p}" for p in pages)
+
+    if citation_style(rec) == "numbered":
+        if rec.get("cited_sources"):
+            line += "  |  Cited: " + format_cited(rec["cited_sources"])
+    elif rec.get("citations"):
+        line += "  |  Cited: " + ", ".join(f"p{p}" for p in rec["citations"])
+    return line
+
+
 def next_ungraded():
     """Load the next answer waiting for a grade, and clear the form.
 
@@ -157,11 +296,7 @@ def next_ungraded():
     rec = ungraded[0]
     header = (f"**{len(ungraded)} waiting** - {graded} already graded\n\n"
               f"### {rec['question']}")
-    pages = "Retrieved pages: " + ", ".join(f"p{p}" for p in rec["retrieved_pages"])
-    if rec["citations"]:
-        pages += "  |  Cited: " + ", ".join(f"p{p}" for p in rec["citations"])
-
-    return header, rec["answer"], pages, rec["id"], None, None, ""
+    return header, rec["answer"], pages_line(rec), rec["id"], None, None, ""
 
 
 def save_grade(record_id, grade, citation_check, comment, name):
@@ -206,16 +341,20 @@ def summary():
                      "Fix these before anyone else uses the system.")
 
     # The triage that makes grades actionable: for each bad answer, was a
-    # known-correct page even in the context?
+    # known-correct page even in the context? Only pages of the document the
+    # gold pages belong to count (see pages_from).
     retrieval_fault = generation_fault = 0
     new_questions = []
     for r in records:
         if r["grade"].startswith("Correct and complete"):
             continue
-        gold = gold_pages_for(r["question"])
-        if gold is None:
+        q = gold_question(r["question"])
+        if q is None:
             new_questions.append(r["question"])
-        elif any(p in gold for p in r["retrieved_pages"]):
+            continue
+        gold = q.get("gold_pages", [])
+        retrieved = pages_from(r, q.get("gold_source", config.DEFAULT_SOURCE))
+        if any(p in gold for p in retrieved):
             generation_fault += 1
         else:
             retrieval_fault += 1
@@ -306,6 +445,17 @@ with gr.Blocks(title="Mohs reconstruction reference") as demo:
             placeholder="Reconstruction options for a 1.5 cm defect of the nasal ala",
             lines=3,
         )
+        # Only when the index spans clinical and operations documents. With
+        # the textbook alone there is nothing to filter, so no checkbox -
+        # and ask() gets domains=None, which searches exactly as before.
+        DOMAIN_CHOICES = domain_choices()
+        domain_filter = None
+        if DOMAIN_CHOICES:
+            domain_filter = gr.CheckboxGroup(
+                DOMAIN_CHOICES,
+                value=[value for _, value in DOMAIN_CHOICES],
+                label="Search in",
+            )
         ask_btn = gr.Button("Ask", variant="primary")
 
         citations_md = gr.Markdown("_No question asked yet._", elem_id="cites_panel")
@@ -329,7 +479,8 @@ with gr.Blocks(title="Mohs reconstruction reference") as demo:
 
         ask_btn.click(
             ask,
-            inputs=[question, name, test_mode],
+            inputs=[question, name, test_mode]
+                   + ([domain_filter] if domain_filter is not None else []),
             outputs=[answer_md, citations_md, figures_gallery, passages_md],
         )
 
