@@ -22,6 +22,8 @@ REVIEW_SHEET_PATH = EVAL_DIR / "review_sheet.md"
 RESULTS_PATH = EVAL_DIR / "results.jsonl"
 JUDGE_RUNS_PATH = EVAL_DIR / "judge_runs.jsonl"
 REPORTS_DIR = EVAL_DIR / "reports"
+# The website's conversations (src/chatdb.py). Gitignored.
+CHAT_DB_PATH = EVAL_DIR / "chat.db"
 
 # The textbook. Chunks written before the multi-source index have no
 # "source" field; they belong to this one. questions.json gold_pages are

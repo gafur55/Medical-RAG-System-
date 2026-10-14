@@ -45,3 +45,8 @@ data/eval/reports/
 
 # storage.py cross-process lock
 *.jsonl.lock
+
+# Chat website database (src/chatdb.py)
+*.db
+*.db-wal
+*.db-shm

@@ -28,7 +28,6 @@ Any of these, and HF_TOKEN / HF_DATASET, may also come from .env.
 """
 
 import os
-from datetime import datetime, timezone
 
 import gradio as gr
 from dotenv import load_dotenv
@@ -40,101 +39,21 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from src import config, storage  # noqa: E402
-from src.generate import answer, groq_llm  # noqa: E402
+from src.chat import (EXAMPLES, condense, conversation, make_record as _make_record,  # noqa: E402,F401
+                      source_lines, text_of)
+from src.generate import answer  # noqa: E402
 
-
-CONDENSE_PROMPT = """Rewrite the user's last message as one standalone question
-that can be understood without the conversation. Keep every clinical detail
-(site, size, depth, structures involved). If it is already standalone,
-return it unchanged. Return only the question.
-
-CONVERSATION:
-{history}
-
-LAST MESSAGE: {message}
-
-STANDALONE QUESTION:"""
-
-# How many earlier user/assistant turns the rewrite sees. Enough for "and for
-# a larger one?"; more only adds tokens and old topics.
-CONDENSE_TURNS = 3
 
 PLACEHOLDER = """### Mohs reconstruction reference
 Ask about defects, flaps, grafts and repair options.
 Answers come only from the indexed sources, with citations.
 A reference tool, not clinical advice. **Do not enter patient-identifying information.**"""
 
-EXAMPLES = [
-    "Reconstruction options for a 1.5 cm defect of the nasal ala",
-    "When is a bilobed flap indicated and how is it designed?",
-    "Repair of a full-thickness lower lip defect involving more than one-third of the lip",
-]
-
 CSS = """
 .gradio-container { max-width: 780px !important; margin: 0 auto !important; }
 footer { display: none !important; }
 .gradio-container p, .gradio-container li { font-size: 16px; line-height: 1.7; }
 """
-
-
-# --------------------------------------------------------------- history
-def text_of(content):
-    """Message content -> plain text. Gradio gives a string, or a list of
-    parts like [{"type": "text", "text": "..."}] for multimodal messages."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return " ".join(text_of(p) for p in content)
-    if isinstance(content, dict):
-        return content.get("text") or ""
-    return ""
-
-
-def conversation(history, turns=CONDENSE_TURNS):
-    """The last few user/assistant exchanges as text, without the Sources
-    panels (messages carrying a metadata title)."""
-    lines = []
-    for m in history or []:
-        if m.get("metadata") and m["metadata"].get("title"):
-            continue
-        role = "User" if m.get("role") == "user" else "Assistant"
-        lines.append(f"{role}: {text_of(m.get('content'))}")
-    return "\n".join(lines[-2 * turns:])
-
-
-def condense(message, history, llm=None):
-    """Follow-up -> standalone question. No earlier user turn, nothing to do.
-    If the rewrite fails or comes back empty, search the message as typed."""
-    if not any(m.get("role") == "user" for m in history or []):
-        return message
-    llm = llm or groq_llm
-    try:
-        rewritten = llm(CONDENSE_PROMPT.format(history=conversation(history),
-                                               message=message))
-    except Exception as e:
-        print(f"[chat] condense failed ({type(e).__name__}); using the message as typed")
-        return message
-    rewritten = " ".join((rewritten or "").split()).strip('"')
-    return rewritten or message
-
-
-# --------------------------------------------------------------- sources
-def source_lines(result):
-    """One line per passage the model was shown, cited ones marked."""
-    labels = config.source_labels()
-    cited_pages = set(result.get("citations") or [])
-    cited_ids = {s.get("chunk_id") for s in result.get("cited_sources") or []}
-    lines = []
-    for hit in result.get("retrieved") or []:
-        c = hit["chunk"]
-        source = c.get("source") or c.get("book") or config.DEFAULT_SOURCE
-        where = c.get("locator") or (f"p. {c['page']}" if c.get("page") else "")
-        name = ", ".join(x for x in (labels.get(source, source), where) if x)
-        cited = c["id"] in cited_ids or (not cited_ids and c.get("page") in cited_pages)
-        mark = " - cited" if cited else ""
-        snippet = c["text"][:220] + ("..." if len(c["text"]) > 220 else "")
-        lines.append(f"{hit['rank']}. **{name}**{mark}  \n{snippet}")
-    return lines
 
 
 def sources_message(result, standalone, message):
@@ -150,26 +69,8 @@ def sources_message(result, standalone, message):
 
 # ------------------------------------------------------------------ turn
 def make_record(result, message, standalone, session):
-    now = datetime.now(timezone.utc)
-    return {
-        "id": now.strftime("%Y%m%d%H%M%S%f"),
-        "timestamp": now.isoformat(timespec="seconds"),
-        "asked_by": os.environ.get("MOHS_CHAT_USER", "chat user"),
-        "channel": "chat",
-        "conversation_id": session,
-        "message": message,
-        "question": standalone,
-        "answer": result["text"],
-        "citations": result["citations"],
-        "cited_sources": result.get("cited_sources", []),
-        "retrieved_ids": result["retrieved_ids"],
-        "retrieved_pages": result["retrieved_pages"],
-        "retrieved_sources": result.get("retrieved_sources", []),
-        "figures": result["figures"],
-        "config": result["config"],
-        "grade": None,
-        "is_test": os.environ.get("MOHS_TEST_MODE") == "1",
-    }
+    """sessions.jsonl record for one answer (see src/chat.py)."""
+    return _make_record(result, message, standalone, session, channel="chat")
 
 
 def turn(message, history, session="", answer_fn=None, llm=None):

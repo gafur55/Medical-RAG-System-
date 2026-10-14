@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Mohs Reference</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="layout" id="layout">
+
+    <!-- ------------------------------------------------------ sidebar -->
+    <aside class="sidebar" id="sidebar" aria-label="Conversations">
+      <div class="sidebar-top">
+        <a class="brand" href="/" id="brand">
+          <img src="/static/icon.svg" alt="" width="28" height="28">
+          <span>Mohs Reference</span>
+        </a>
+        <button class="icon-btn only-mobile" id="close-sidebar" aria-label="Close sidebar">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+
+      <button class="new-chat" id="new-chat">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        New chat
+        <kbd class="hint">⇧⌘O</kbd>
+      </button>
+
+      <div class="search-wrap">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input id="search" type="search" placeholder="Search chats" autocomplete="off" aria-label="Search chats">
+      </div>
+
+      <nav class="conversations" id="conversations"></nav>
+
+      <div class="sidebar-foot">
+        <div class="status" id="status">
+          <span class="dot" id="status-dot"></span>
+          <span id="status-text">Connecting…</span>
+        </div>
+        <div class="sources-line" id="sources-line"></div>
+      </div>
+    </aside>
+    <div class="scrim" id="scrim" hidden></div>
+
+    <!-- --------------------------------------------------------- main -->
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn only-mobile" id="open-sidebar" aria-label="Open sidebar">
+          <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <h1 class="title" id="title">New chat</h1>
+        <span class="badge test-badge" id="test-badge" hidden>Test mode</span>
+      </header>
+
+      <section class="thread" id="thread" aria-live="polite">
+        <div class="empty" id="empty">
+          <img class="empty-logo" src="/static/icon.svg" alt="" width="56" height="56">
+          <h2>What are you reconstructing today?</h2>
+          <p class="empty-sub" id="empty-sub">Answers come only from the indexed sources, with page citations.</p>
+          <div class="examples" id="examples"></div>
+        </div>
+        <div class="messages" id="messages"></div>
+      </section>
+
+      <footer class="composer-wrap">
+        <form class="composer" id="composer">
+          <textarea id="input" rows="1" placeholder="Ask a reconstruction question…"
+                    aria-label="Your question" autocomplete="off"></textarea>
+          <button type="submit" class="send" id="send" aria-label="Send" disabled>
+            <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+          </button>
+        </form>
+        <div class="composer-meta">
+          <span>Reference tool, not clinical advice. Verify against the cited pages. Never enter patient-identifying information.</span>
+          <span class="counter" id="counter"></span>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <!-- figure viewer -->
+  <div class="lightbox" id="lightbox" hidden>
+    <button class="icon-btn lightbox-close" id="lightbox-close" aria-label="Close">
+      <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <img id="lightbox-img" alt="Figure from the source">
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="assertive"></div>
+</body>
+</html>
