@@ -74,9 +74,16 @@ DOMAIN_LABELS = {
 
 
 def indexed_sources():
-    """The manifest's source entries. [] before ingest.py has written one -
-    which means the index is the textbook alone, as it always was."""
-    return config.index_manifest().get("sources", [])
+    """The manifest's source entries that have something to retrieve. []
+    before ingest.py has written one - which means the index is the
+    textbook alone, as it always was.
+
+    A source whose loader found no text (a scanned PDF, say) is still in
+    the manifest, with n_chunks 0. Naming it in the disclaimer, or offering
+    its domain in the filter, would promise passages that can never come
+    back. Entries without n_chunks count as indexed."""
+    return [s for s in config.index_manifest().get("sources", [])
+            if s.get("n_chunks", 1) > 0]
 
 
 def sources_sentence(sources):
@@ -106,8 +113,13 @@ def indexed_domains():
 
 def domain_choices():
     """(label, value) pairs for the "Search in" filter, or [] when there is
-    nothing to choose between - one domain means no filter on screen."""
-    domains = indexed_domains()
+    nothing to choose between - one domain means no filter on screen.
+
+    Only domains config.RETRIEVE_DOMAINS searches. The filter may narrow
+    config, never widen it, so the Ask tab searches what score.py, the
+    sweep and chat_app measure. If config leaves one indexed domain, there
+    is no filter and ask() gets domains=None - config decides."""
+    domains = [d for d in indexed_domains() if d in config.RETRIEVE_DOMAINS]
     if len(domains) < 2:
         return []
     return [(DOMAIN_LABELS.get(d, d.capitalize()), d) for d in domains]
@@ -445,7 +457,8 @@ with gr.Blocks(title="Mohs reconstruction reference") as demo:
             placeholder="Reconstruction options for a 1.5 cm defect of the nasal ala",
             lines=3,
         )
-        # Only when the index spans clinical and operations documents. With
+        # Only when the index spans clinical and operations documents and
+        # config.RETRIEVE_DOMAINS searches both (see domain_choices). With
         # the textbook alone there is nothing to filter, so no checkbox -
         # and ask() gets domains=None, which searches exactly as before.
         DOMAIN_CHOICES = domain_choices()

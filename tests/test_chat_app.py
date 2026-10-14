@@ -113,3 +113,80 @@ def test_empty_message_and_missing_key(chat):
 
 def test_ui_builds(chat):
     assert chat.demo is not None
+
+
+# A second Python process imports chat_app the way `python3 chat_app.py`
+# does. Its .env (a stubbed load_dotenv) holds HF credentials and a
+# MOHS_SESSIONS_PATH redirect; huggingface_hub records calls instead of
+# reaching the Hub, and EVAL_DIR is a temporary folder.
+DOTENV_SCRIPT = r"""
+import json, os
+from pathlib import Path
+
+import dotenv
+import huggingface_hub
+
+calls = []
+
+def hf_hub_download(*args, **kwargs):
+    calls.append("pull")
+    raise FileNotFoundError("sessions.jsonl")
+
+huggingface_hub.hf_hub_download = hf_hub_download
+
+class HfApi:
+    def __init__(self, token=None):
+        pass
+
+    def upload_file(self, **kwargs):
+        calls.append("push")
+
+huggingface_hub.HfApi = HfApi
+
+def fake_load_dotenv(*args, **kwargs):
+    os.environ.setdefault("HF_TOKEN", "token-from-dotenv")
+    os.environ.setdefault("HF_DATASET", "user/mohs-sessions")
+    os.environ.setdefault("MOHS_SESSIONS_PATH", os.environ["SCRATCH"])
+    return True
+
+dotenv.load_dotenv = fake_load_dotenv
+
+from src import config
+config.EVAL_DIR = Path(os.environ["FAKE_EVAL_DIR"])
+
+import chat_app
+from src import storage
+
+result = {"question": "q", "text": "t", "citations": [], "retrieved_ids": [],
+          "retrieved_pages": [], "retrieved": [], "figures": [], "config": {}}
+chat_app.turn("bilobed flap?", [], answer_fn=lambda q: result)
+print(json.dumps({"token": storage.HF_TOKEN, "path": str(storage.SESSIONS_PATH),
+                  "calls": calls}))
+"""
+
+
+def test_dotenv_and_redirect_apply_before_storage_starts(tmp_path):
+    """storage reads HF_TOKEN / HF_DATASET / MOHS_SESSIONS_PATH and pulls
+    the moment it is imported, so chat_app must load .env first. And a
+    redirected scratch file is never pulled into or pushed as the dataset's
+    sessions.jsonl."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    from src import config
+
+    scratch = tmp_path / "chat.jsonl"
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("HF_TOKEN", "HF_DATASET", "MOHS_SESSIONS_PATH", "MOHS_TEST_MODE")}
+    env.update(SCRATCH=str(scratch), FAKE_EVAL_DIR=str(tmp_path / "eval"),
+               GRADIO_ANALYTICS_ENABLED="False", HF_HUB_OFFLINE="1")
+    out = subprocess.run([sys.executable, "-c", DOTENV_SCRIPT], cwd=config.ROOT, env=env,
+                         capture_output=True, text=True, timeout=180)
+    assert out.returncode == 0, out.stderr[-2000:]
+
+    seen = json.loads(out.stdout.splitlines()[-1])
+    assert seen == {"token": "token-from-dotenv", "path": str(scratch), "calls": []}
+    assert [json.loads(l)["channel"] for l in scratch.read_text().splitlines()] == ["chat"]
+    assert not (tmp_path / "eval" / "sessions.jsonl").exists()

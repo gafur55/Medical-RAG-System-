@@ -14,7 +14,8 @@ Why a dated markdown file and not a dashboard: the readers are a student
 and a surgeon, once a day. A file needs no server, stays in a folder as a
 history, and reads fine in any editor. Next to each report sits a .json with
 the same numbers, so tomorrow's report can say what changed since tonight
-without parsing markdown.
+without parsing markdown. It also lists the ids of the app records tonight
+saw, so a grade copied down from the Hub late is still reported once.
 
 Why every section is wrapped: the night the Groq key expires should still
 produce the index check and the surgeon's grades. A section that raises
@@ -781,12 +782,57 @@ def short_grade(grade):
     return str(grade).split(" - ")[0].strip()
 
 
-def activity(records, test_ids, questions, since):
-    """The numbers behind the activity section. Pure."""
+def grade_key(record):
+    """(id, short grade): what makes a grade "already reported". A changed
+    grade is a new key, so a regrade is reported again."""
+    return (str(record["id"]), short_grade(record["grade"]))
+
+
+def previously_seen(prev_act):
+    """(seen ids, seen grade keys) from the previous report's activity facts,
+    as sets. None for either one the report did not store - a report from
+    before they were kept, or one whose activity section failed."""
+    prev_act = prev_act if isinstance(prev_act, dict) else {}
+    ids, pairs = prev_act.get("seen_ids"), prev_act.get("graded_seen")
+    seen_ids = {str(i) for i in ids} if isinstance(ids, list) else None
+    graded_seen = ({(str(p[0]), str(p[1])) for p in pairs
+                    if isinstance(p, (list, tuple)) and len(p) == 2}
+                   if isinstance(pairs, list) else None)
+    return seen_ids, graded_seen
+
+
+def is_new(record, since, seen_ids):
+    """Not in the copy of sessions.jsonl the previous report read.
+
+    By id, not by time: the surgeon's grades reach this machine only when
+    someone copies sessions.jsonl down from the Hub, often after a report
+    has already run. A record asked on Monday and copied down on Wednesday
+    is still new on Thursday. Time is the fallback - for a previous report
+    that stored no ids, and for a record without one."""
+    if seen_ids is not None and record.get("id") is not None:
+        return str(record["id"]) not in seen_ids
+    return after(record.get("timestamp"), since)
+
+
+def is_newly_graded(record, since, graded_seen):
+    """A grade the previous report did not see - a late Hub copy or a
+    regrade included. Same fallback as is_new."""
+    if graded_seen is not None and record.get("id") is not None:
+        return grade_key(record) not in graded_seen
+    return after(record.get("graded_at") or record.get("timestamp"), since)
+
+
+def activity(records, test_ids, questions, since, prev_act=None):
+    """The numbers behind the activity section. Pure.
+
+    prev_act is the previous report's activity facts: what it saw decides
+    what is new tonight (is_new). seen_ids and graded_seen record what
+    tonight saw, for tomorrow."""
     real = [r for r in records if not is_test(r, test_ids)]
     graded = [r for r in real if r.get("grade")]
-    new = [r for r in real if after(r.get("timestamp"), since)]
-    newly_graded = [r for r in graded if after(r.get("graded_at") or r.get("timestamp"), since)]
+    seen_ids, graded_seen = previously_seen(prev_act)
+    new = [r for r in real if is_new(r, since, seen_ids)]
+    newly_graded = [r for r in graded if is_newly_graded(r, since, graded_seen)]
     known = {normalize_question(q.get("question")) for q in questions}
     candidates, seen = [], set()
     for r in new:
@@ -806,6 +852,10 @@ def activity(records, test_ids, questions, since):
         "harmful": [r for r in newly_graded if str(r["grade"]).startswith(HARMFUL)],
         "misleading": [r for r in newly_graded if str(r["grade"]).startswith(MISLEADING)],
         "candidates": candidates,
+        # Record ids are opaque (a timestamp or UUID), and reports/ is gitignored.
+        "seen_ids": sorted({str(r["id"]) for r in real if r.get("id") is not None}),
+        "graded_seen": sorted(list(k) for k in {grade_key(r) for r in graded
+                                                if r.get("id") is not None}),
     }
 
 
@@ -828,7 +878,8 @@ def section_activity(ctx):
     questions = read_json(config.QUESTIONS_PATH, []) or []
     previous = ctx.get("previous")
     since = parse_time(previous.get("generated_at")) if previous else None
-    a = activity(records, read_test_ids(listed_test_ids_path()), questions, since)
+    a = activity(records, read_test_ids(listed_test_ids_path()), questions, since,
+                 prev_act=(previous or {}).get("activity"))
 
     if path.exists():
         changed = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
@@ -872,7 +923,9 @@ def section_activity(ctx):
 
     facts = {k: a[k] for k in ("real", "test", "graded", "ungraded", "new", "newly_graded", "grades")}
     facts.update(harmful=len(a["harmful"]), misleading=len(a["misleading"]),
-                 candidates=len(a["candidates"]), unreadable=bad)
+                 candidates=len(a["candidates"]), unreadable=bad,
+                 # Go into the .json, so tomorrow can tell what tonight already showed.
+                 seen_ids=a["seen_ids"], graded_seen=a["graded_seen"])
     return Section("activity", "Surgeon activity", "\n".join(lines), facts)
 
 

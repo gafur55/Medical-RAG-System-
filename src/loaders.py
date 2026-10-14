@@ -62,9 +62,16 @@ References / Bibliography heading becomes one reference unit per entry.
 Retrieval leaves them out by default (config.RETRIEVE_KINDS), but they stay
 in the index for anyone who wants to look a citation up.
 
-Duplicates: ingest refuses two chunks with one ID, and an ID hashes the
-locator and the text. So a unit whose text repeats verbatim under the same
-locator (the same reference in two sections' lists, say) is kept once.
+Tables, unlike references, are searched like prose (RETRIEVE_KINDS has
+"table"); skip_tables is how a source keeps its tables out of the index.
+
+Duplicates: ingest refuses two chunks with one ID. An ID hashes the text
+and its place: the page for PDFs, the section path for everything else. So
+a unit is kept once per place: text repeated verbatim in one section, or
+on one PDF page, is a duplicate; the same text under a same-named
+subsection of another section ("Cryosurgery" under both BCC and SCC) is
+not, and both stay. References are the exception: one repeated in two
+sections' "References" lists is kept once, under the first.
 
 Third-party parsers (BeautifulSoup, python-docx, PyMuPDF) are imported
 inside their loader: only ingestion needs them, never the app.
@@ -180,7 +187,7 @@ class UnitCollector:
     Every loader drives one of these, so the rules that are the same for
     all formats live in one place: the section path, the locator, dropping
     excluded sections, turning everything under References into reference
-    units, and keeping a repeated (locator, text) once.
+    units, and keeping a text repeated at one place once (see _emit).
     """
 
     def __init__(self, title, exclude_sections=DEFAULT_EXCLUDE_SECTIONS, trust_levels=True):
@@ -271,7 +278,16 @@ class UnitCollector:
         return True
 
     def _emit(self, text, kind):
-        key = (self.locator, self.page, kind, text)
+        """Keyed on the place the chunk ID hashes - the page for PDFs, the
+        whole section path otherwise. Keyed on the innermost heading alone,
+        the SCC "Cryosurgery" contraindications were dropped as repeats of
+        the BCC ones. References keep the looser locator key: a citation in
+        two sections' reference lists is one entry, not two."""
+        if self.page is not None or kind == "reference":
+            place = self.locator
+        else:
+            place = self.section
+        key = (place, self.page, kind, text)
         if text and key not in self._seen:
             self._seen.add(key)
             self.units.append(Unit(text, self.section, self.locator, self.page, kind))
@@ -288,6 +304,44 @@ def row_text(cells):
     while cells and not cells[-1]:
         cells.pop()
     return " | ".join(cells) if any(cells) else ""
+
+
+def expand_spans(rows):
+    """Rows of (text, rowspan, colspan) cells -> rows of cell texts, in
+    which a cell spanning several rows is repeated in each of them.
+
+    Without this, a stage cell spanning four rows ("III" over T1 N1, T2 N1,
+    T3 N0, T3 N1) names only the first, and every later row shifts one
+    column left, its T value under "Stage". A colspan pads with empty
+    cells, so the next cell stays under its own header (a full-width
+    footnote row stays one cell: row_text drops trailing empties).
+    rowspan 0 means "to the last row given". Pure.
+    """
+    out, pending = [], {}      # column -> [text, rows still to fill]
+
+    def carry(row, col, stop=None):
+        """Fill row from col with the cells spanning down into it."""
+        while col in pending or (stop is not None and col < stop):
+            text, left = pending.pop(col, ("", 0))
+            row.append(text)
+            if left > 1:
+                pending[col] = [text, left - 1]
+            col += 1
+        return col
+
+    for r, cells in enumerate(rows):
+        row, col = [], 0
+        for text, rowspan, colspan in cells:
+            col = carry(row, col)
+            rowspan = len(rows) - r if rowspan == 0 else rowspan
+            for k in range(colspan):
+                row.append(text if k == 0 else "")
+                if rowspan > 1:
+                    pending[col] = [text if k == 0 else "", rowspan - 1]
+                col += 1
+        carry(row, col, stop=max(pending, default=-1) + 1)
+        out.append(row)
+    return out
 
 
 def table_texts(rows, header=(), caption="", limit=None):
@@ -338,9 +392,15 @@ _BLOCK_TAGS = _HEADING_TAGS | {
     "header", "hgroup", "hr", "li", "main", "menu", "nav", "ol", "p", "pre", "section",
     "summary", "table", "ul"}
 _PROSE_TAGS = {"p", "li", "dd", "dt", "blockquote", "pre", "address", "summary"}
-_STRIP_TAGS = ["script", "style", "nav", "header", "footer", "aside", "form", "noscript",
-               "template", "button", "iframe", "svg", "select", "head"]
+# Not "form": ASP.NET pages - the Medicare Coverage Database's LCDs and
+# billing articles - wrap the whole document in one <form>. Its controls
+# go; the form itself is unwrapped unless it is a widget (strip_furniture).
+_STRIP_TAGS = ["script", "style", "nav", "header", "footer", "aside", "noscript",
+               "template", "button", "iframe", "svg", "select", "input", "textarea", "head"]
 _STRIP_ROLES = {"navigation", "banner", "contentinfo", "search", "complementary"}
+# A form with less text than this once its controls are gone, and no
+# heading, is a widget (a search box, a newsletter sign-up), not content.
+_WIDGET_FORM_CHARS = 200
 # NCBI Bookshelf / PMC page furniture: sidebars (similar articles, recent
 # activity), print/share widgets, "Go to:" links, the disclosure/copyright
 # footer of a StatPearls chapter.
@@ -379,9 +439,20 @@ def html_units(markup, title="", skip_tables=False, exclude_sections=DEFAULT_EXC
 
 
 def strip_furniture(soup):
-    """Remove scripts, navigation, sidebars and widgets, in place."""
+    """Remove scripts, navigation, sidebars and widgets, in place.
+
+    A <form> is removed only when it is a widget (is_widget_form); any
+    other form is unwrapped, its content kept where it stood. Deleting
+    every form left an MCD coverage page with no text at all."""
     for tag in soup.find_all(_STRIP_TAGS):
         tag.decompose()
+    for form in soup.find_all("form"):
+        if form.decomposed or form.attrs is None:
+            continue
+        if is_widget_form(form):
+            form.decompose()
+        else:
+            form.unwrap()
     for tag in soup.find_all(True):
         if tag.decomposed or tag.attrs is None:
             continue
@@ -390,6 +461,16 @@ def strip_furniture(soup):
                 or classes & _STRIP_CLASSES or tag.has_attr("hidden")
                 or tag.get("aria-hidden") == "true"):
             tag.decompose()
+
+
+def is_widget_form(form):
+    """A search box or a sign-up form: role="search", or (its controls
+    already stripped) under _WIDGET_FORM_CHARS of text and no heading.
+    The heading test keeps a short document that happens to sit in a form."""
+    if form.get("role") == "search":
+        return True
+    return (len(form.get_text(strip=True)) < _WIDGET_FORM_CHARS
+            and form.find(sorted(_HEADING_TAGS)) is None)
 
 
 def main_container(soup):
@@ -420,6 +501,19 @@ def _is_footnote_mark(tag):
         return False
     return bool(re.fullmatch(r",?[a-z](?:\s*,\s*[a-z])*,?|[*†‡§¶#]+",
                              tag.get_text(strip=True)))
+
+
+def _span(cell, attr):
+    """A cell's rowspan / colspan as an int: 1 when missing or garbled,
+    0 kept for rowspan ("to the end of the row group"), capped where the
+    HTML spec caps them."""
+    try:
+        n = int(str(cell.get(attr, 1)).strip())
+    except ValueError:
+        return 1
+    if attr == "rowspan":
+        return min(n, 65534) if n >= 0 else 1
+    return min(n, 1000) if n >= 1 else 1
 
 
 def _is_caption(tag):
@@ -463,7 +557,10 @@ class _HtmlWalker:
         name, classes = el.name, _classes(el)
         if name in _HEADING_TAGS:
             self.out.heading(int(name[1]), self.text(el))
-        elif name == "table" or classes & _TABLE_CLASSES:
+        elif (name == "table" or classes & _TABLE_CLASSES
+              or name == "figure" and el.find("table") is not None):
+            # HTML5 captions a table as <figure><table/><figcaption/></figure>;
+            # figure() would keep the caption and lose every row.
             self.table(el)
         elif _is_caption(el):
             self.out.add(self.text(el), "caption")
@@ -500,8 +597,8 @@ class _HtmlWalker:
             return
         table = el if el.name == "table" else el.find("table")
         caption_parts = []
-        if el is not table:   # wrapper (Bookshelf div.table): its title and caption
-            for part in el.find_all(sorted(_HEADING_TAGS) + ["div", "p"]):
+        if el is not table:   # wrapper (Bookshelf div.table, <figure>): its title and caption
+            for part in el.find_all(sorted(_HEADING_TAGS) + ["div", "p", "figcaption"]):
                 if (part.name in _HEADING_TAGS or _is_caption(part)) and not part.find_parent("table"):
                     caption_parts.append(self.text(part))
         if table is None:
@@ -523,8 +620,25 @@ class _HtmlWalker:
         body = [tr for tr in rows if id(tr) not in taken]
         if not head and body and all(c.name == "th" for c in self._cells(body[0])):
             head, body = body[:1], body[1:]
-        render = lambda trs: [row_text(self.text(c) for c in self._cells(tr)) for tr in trs]
+        grid = self._grid(rows)
+        render = lambda trs: [row_text(grid[id(tr)]) for tr in trs]
         self.out.add_table(render(body) + render(foot), render(head), " ".join(caption_parts))
+
+    def _grid(self, rows):
+        """id(tr) -> its cell texts, rowspan and colspan expanded. A row
+        group (thead, each tbody, tfoot) is expanded on its own: by the
+        HTML spec a rowspan never reaches across one."""
+        groups = {}
+        for tr in rows:
+            group = tr.find_parent(["thead", "tbody", "tfoot", "table"])
+            groups.setdefault(id(group), []).append(tr)
+        grid = {}
+        for trs in groups.values():
+            cells = [[(self.text(c), _span(c, "rowspan"), _span(c, "colspan"))
+                      for c in self._cells(tr)] for tr in trs]
+            for tr, texts in zip(trs, expand_spans(cells)):
+                grid[id(tr)] = texts
+        return grid
 
     @staticmethod
     def _cells(tr):
@@ -827,28 +941,85 @@ def _element_citation(cite):
 def load_docx(path, title="", skip_tables=False, exclude_sections=DEFAULT_EXCLUDE_SECTIONS):
     """Word document -> Units. Title / Heading N styles drive the section
     path; paragraphs and tables are read in body order (python-docx's
-    doc.paragraphs and doc.tables would separate them)."""
+    doc.paragraphs and doc.tables would separate them), content controls
+    and custom-XML wrappers included (docx_blocks). Text comes from
+    docx_text, not python-docx's Paragraph.text / _Cell.text, which miss
+    tracked insertions, content controls and nested tables."""
     import docx
     from docx.table import Table
     from docx.text.paragraph import Paragraph
     doc = docx.Document(str(path))
     out = UnitCollector(title, exclude_sections)
-    for child in doc.element.body.iterchildren():
-        tag = _local(child.tag)
-        if tag == "p":
-            paragraph = Paragraph(child, doc)
+    for block in docx_blocks(doc.element.body):
+        if _local(block.tag) == "p":
+            paragraph = Paragraph(block, doc)
             style = paragraph.style.name if paragraph.style is not None else ""
             level = docx_heading_level(style)
+            text = docx_text(block)
             if level is not None:
-                out.heading(level, paragraph.text)
+                out.heading(level, text)
             elif style.lower() == "caption":
-                out.add(paragraph.text, "caption")
+                out.add(text, "caption")
             else:
-                out.add(paragraph.text)
-        elif tag == "tbl" and not skip_tables:
-            rows = [row_text(_docx_cells(row)) for row in Table(child, doc).rows]
+                out.add(text)
+        elif not skip_tables:
+            rows = [row_text(_docx_cells(row)) for row in Table(block, doc).rows]
             out.add_table(rows[1:], rows[:1])
     return out.units
+
+
+_W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_MC_NS = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+# Never visible text: deleted / moved-away revisions, the fallback copy of
+# an mc:AlternateContent (the same text box again, as VML), and property
+# elements (pPr's w:tabs holds w:tab tab stops, not tabs).
+_DOCX_SKIP = {_W_NS + t for t in ("del", "moveFrom", "pPr", "rPr", "sdtPr", "sdtEndPr",
+                                  "tblPr", "trPr", "tcPr")} | {_MC_NS + "Fallback"}
+_DOCX_CHARS = {_W_NS + "tab": " ", _W_NS + "ptab": " ", _W_NS + "br": " ", _W_NS + "cr": " ",
+               _W_NS + "noBreakHyphen": "-"}
+
+
+def docx_blocks(parent):
+    """The w:p and w:tbl elements of a body or a table cell, in order,
+    looking through content controls (w:sdt -> w:sdtContent) and
+    w:customXml, which can wrap whole headings, paragraphs and tables."""
+    for child in parent.iterchildren():
+        tag = child.tag
+        if tag in (_W_NS + "p", _W_NS + "tbl"):
+            yield child
+        elif tag == _W_NS + "sdt" and not _showing_placeholder(child):
+            for content in child.iterchildren(_W_NS + "sdtContent"):
+                yield from docx_blocks(content)
+        elif tag == _W_NS + "customXml":
+            yield from docx_blocks(child)
+
+
+def _showing_placeholder(sdt):
+    """An empty content control shows its prompt ("Click or tap here to
+    enter text.") as real runs - not document text."""
+    return sdt.find(f"{_W_NS}sdtPr/{_W_NS}showingPlcHdr") is not None
+
+
+def docx_text(el):
+    """Text of a paragraph as Word shows it with changes accepted: every
+    w:t below it - inside runs, hyperlinks, tracked insertions, inline
+    content controls, smart tags, fields - minus _DOCX_SKIP. So the tracked
+    replacement "Max dose is <del>5</del><ins>7</ins> mg/kg" reads
+    "Max dose is 7 mg/kg", not python-docx's "Max dose is  mg/kg"."""
+    parts = []
+    for child in el.iterchildren():
+        tag = child.tag
+        if not isinstance(tag, str) or tag in _DOCX_SKIP:
+            continue
+        if tag == _W_NS + "sdt" and _showing_placeholder(child):
+            continue
+        if tag == _W_NS + "t":
+            parts.append(child.text or "")
+        elif tag in _DOCX_CHARS:
+            parts.append(_DOCX_CHARS[tag])
+        else:
+            parts.append(docx_text(child))
+    return "".join(parts)
 
 
 def docx_heading_level(style_name):
@@ -864,9 +1035,26 @@ def _docx_cells(row):
     cells, previous = [], None
     for cell in row.cells:
         if cell._tc is not previous:
-            cells.append(cell.text)
+            cells.append(docx_cell_text(cell._tc))
         previous = cell._tc
     return cells
+
+
+def docx_cell_text(tc):
+    """A w:tc's text: its paragraphs, and a table nested in it as
+    "a, b; c, d" - rows joined by "; ", cells by ", ". Not " | ": that
+    would read as more columns of the outer table."""
+    parts = []
+    for block in docx_blocks(tc):
+        if block.tag == _W_NS + "p":
+            parts.append(docx_text(block))
+        else:
+            rows = []
+            for tr in block.iterchildren(_W_NS + "tr"):
+                cells = [text_of(docx_cell_text(c)) for c in tr.iterchildren(_W_NS + "tc")]
+                rows.append(", ".join(c for c in cells if c))
+            parts.append("; ".join(r for r in rows if r))
+    return " ".join(p for p in parts if p.strip())
 
 
 # ============================================================ Markdown
@@ -906,12 +1094,35 @@ def md_table_row(line):
     return [md_inline(c.replace("\\|", "|")) for c in re.split(r"(?<!\\)\|", line)]
 
 
+# Front-matter lines when PyYAML is not installed: "key: value", "- item",
+# indented continuations, blanks.
+_YAML_LINE_RE = re.compile(r"^(?:\s*[A-Za-z_][\w-]*\s*:(?:\s|$)|\s*-\s|\s+\S|\s*$)")
+
+
 def _skip_front_matter(lines):
+    """Lines minus a leading YAML front-matter block. A "---" first line
+    alone proves nothing - a plain-text protocol may open with a rule - so
+    the block goes only if it is a YAML mapping (title:, author: ...)."""
     if lines and lines[0].strip() == "---":
         for i, line in enumerate(lines[1:60], start=1):
             if line.strip() in ("---", "..."):
-                return lines[i + 1:]
+                return lines[i + 1:] if is_yaml_mapping(lines[1:i]) else lines
     return lines
+
+
+def is_yaml_mapping(lines):
+    """Do these lines parse as a YAML mapping? PyYAML is imported here,
+    not at the top: it is an ingest-only dependency (requirements-dev.txt),
+    never the app's. Without it, every non-blank line must look like YAML
+    (_YAML_LINE_RE)."""
+    try:
+        import yaml
+    except ImportError:
+        return any(l.strip() for l in lines) and all(_YAML_LINE_RE.match(l) for l in lines)
+    try:
+        return isinstance(yaml.safe_load("\n".join(lines)), dict)
+    except yaml.YAMLError:
+        return False
 
 
 def markdown_units(text, title="", skip_tables=False, exclude_sections=DEFAULT_EXCLUDE_SECTIONS):
@@ -921,9 +1132,11 @@ def markdown_units(text, title="", skip_tables=False, exclude_sections=DEFAULT_E
     separated by blank lines; consecutive list items stay one paragraph (a
     list is one thought), except under References, where each item is one
     entry. Pipe tables become table units; fenced code is kept as text.
+    A leading byte-order mark (Notepad's "UTF-8 with BOM") is dropped, or
+    the first line would be neither "---" nor a "#" heading.
     """
     out = UnitCollector(title, exclude_sections)
-    lines = _skip_front_matter(text.splitlines())
+    lines = _skip_front_matter(text.lstrip("\ufeff").splitlines())
     para = []
 
     def flush():
@@ -982,15 +1195,28 @@ def markdown_units(text, title="", skip_tables=False, exclude_sections=DEFAULT_E
 # ================================================================= PDF
 # Running headers and footers live in the outer band of the page. CMS
 # manuals put theirs about 12% up from the bottom edge (the "Revision Date"
-# footer of the NCCI manual), so the band is wider than the usual 7%. A line
-# there is furniture only if its text, digits removed, repeats on at least
-# 30% of pages - body text never does.
+# footer of the NCCI manual), so the band is wider than the usual 7%.
+# A band that wide also holds the first and last few body lines, table rows
+# included, so a line there is only a furniture candidate if it is also
+# alone on its baseline (a table cell never is) and outside the page's
+# main text block: among the first / last EDGE_ROWS rows and set off from
+# the body by a gap of more than EDGE_GAP line heights. A candidate is
+# furniture if it is a page number, or if its text, digits removed, repeats
+# on at least 30% of pages - body text never does. Texts that short once
+# the digits are gone ("2 g" -> "g", "T1" -> "t") are left out of the
+# repetition count: different cells would collapse into one "header".
 PDF_MARGIN = 0.15
 PDF_REPEAT_FRACTION = 0.30
+EDGE_ROWS = 3                 # a running header / footer is at most this many rows
+EDGE_GAP = 1.0                # gap, in body line heights, that sets one off
+MIN_FURNITURE_CHARS = 4       # shorter normalized texts are never "repeated furniture"
 HEADING_SIZE_RATIO = 1.15     # this much larger than body text = a heading
 MAX_HEADING_CHARS = 150
 PARAGRAPH_GAP = 0.5           # vertical gap, in line heights, that ends a paragraph
-_PAGE_NUMBER_RE = re.compile(r"^(?:page\s+)?(?:\d{1,4}|[ivxlcdm]{1,6})(?:\s*(?:of|/)\s*\d{1,4})?$",
+# Valid roman numerals up to 399 only: no front matter runs longer, and
+# leaving out m and d keeps "mL", "md", "mild", "lid", "IM", "ID" out.
+_ROMAN = r"(?=[ivxlc])c{0,3}(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})"
+_PAGE_NUMBER_RE = re.compile(rf"^(?:page\s+)?(?:\d{{1,4}}|{_ROMAN})(?:\s*(?:of|/)\s*\d{{1,4}})?$",
                              re.IGNORECASE)
 _DOT_LEADER_RE = re.compile(r"(?:\.\s?){6,}|(?:…\s?){3,}")
 _ENTRY_START_RE = re.compile(r"^\s*(?:\[\d{1,4}\]|\d{1,3}\.)\s+\S")
@@ -1054,23 +1280,76 @@ def _in_margin(line, height):
     return middle < height * PDF_MARGIN or middle > height * (1 - PDF_MARGIN)
 
 
+def baseline_rows(lines):
+    """Indices of the non-empty lines, grouped by baseline (y0 within
+    2 pt - the same test pdf_paragraphs uses), top to bottom."""
+    rows = []
+    for i in sorted((i for i, l in enumerate(lines) if l["text"].strip()),
+                    key=lambda i: lines[i]["y0"]):
+        if rows and abs(lines[i]["y0"] - lines[rows[-1][0]]["y0"]) < 2:
+            rows[-1].append(i)
+        else:
+            rows.append([i])
+    return rows
+
+
+def _edge_rows(lines, rows):
+    """Row numbers outside the main text block: the first (last) k <=
+    EDGE_ROWS rows when a gap of more than EDGE_GAP body line heights
+    follows (precedes) them - the largest such k. A page of no more than
+    EDGE_ROWS rows has no body block, so all of it counts."""
+    def top(row):
+        return min(lines[i]["y0"] for i in row)
+
+    def bottom(row):
+        return max(lines[i]["y1"] for i in row)
+
+    def set_off(upper, lower, body):
+        height = max(max(lines[i]["y1"] - lines[i]["y0"] for i in body), 1.0)
+        return top(lower) - bottom(upper) > EDGE_GAP * height
+
+    n, edge = len(rows), set()
+    head = [k for k in range(1, min(EDGE_ROWS, n) + 1)
+            if k == n or set_off(rows[k - 1], rows[k], rows[k])]
+    foot = [k for k in range(1, min(EDGE_ROWS, n) + 1)
+            if k == n or set_off(rows[n - k - 1], rows[n - k], rows[n - k - 1])]
+    if head:
+        edge.update(range(max(head)))
+    if foot:
+        edge.update(range(n - max(foot), n))
+    return edge
+
+
+def furniture_candidates(lines, height):
+    """Indices of the lines that may be a running header, footer or page
+    number: in the margin band, alone on their baseline, outside the main
+    text block (see PDF_MARGIN). Pure."""
+    rows = baseline_rows(lines)
+    return {rows[r][0] for r in _edge_rows(lines, rows)
+            if len(rows[r]) == 1 and _in_margin(lines[rows[r][0]], height)}
+
+
 def furniture_texts(pages):
-    """Normalized texts of running headers / footers: lines in the margin
-    band whose text, digits removed, repeats on >= 30% of pages (and at
-    least 2). pages = [(page_height, lines)]."""
+    """Normalized texts of running headers / footers: candidate lines
+    (furniture_candidates) whose text, digits removed, is at least
+    MIN_FURNITURE_CHARS long and repeats on >= 30% of pages (and at least
+    2). pages = [(page_height, lines)]."""
     counts = Counter()
     for height, lines in pages:
-        counts.update({_norm_furniture(l["text"]) for l in lines
-                       if l["text"].strip() and _in_margin(l, height)})
+        counts.update({_norm_furniture(lines[i]["text"])
+                       for i in furniture_candidates(lines, height)})
     needed = max(2, ceil(PDF_REPEAT_FRACTION * len(pages)))
-    return {text for text, n in counts.items() if text and n >= needed}
+    return {text for text, n in counts.items()
+            if len(text) >= MIN_FURNITURE_CHARS and n >= needed}
 
 
-def _is_furniture(line, height, furniture):
-    text = line["text"].strip()
+def _is_furniture(text, candidate, furniture):
+    """A table-of-contents line anywhere; a candidate line (see
+    furniture_candidates) that is a page number or a repeated header."""
+    text = text.strip()
     if _DOT_LEADER_RE.search(text):
         return True
-    if not _in_margin(line, height):
+    if not candidate:
         return False
     return _norm_furniture(text) in furniture or bool(_PAGE_NUMBER_RE.match(text))
 
@@ -1201,7 +1480,9 @@ def pdf_units(pages, title="", exclude_sections=DEFAULT_EXCLUDE_SECTIONS):
     parsed = []        # per page: [(kind, text, size)]
     large = []         # (size, page) of every large-font heading
     for page_number, (height, lines) in enumerate(pages, start=1):
-        kept = [l for l in lines if not (l["text"].strip() and _is_furniture(l, height, furniture))]
+        candidates = furniture_candidates(lines, height)
+        kept = [l for i, l in enumerate(lines) if not (
+            l["text"].strip() and _is_furniture(l["text"], i in candidates, furniture))]
         items = []
         for para in pdf_paragraphs(kept, body, known):
             text = join_lines([l["text"] for l in para], words)

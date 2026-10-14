@@ -2,6 +2,7 @@
 tmp_path or in memory - nothing is downloaded and nothing in data/ is read."""
 
 import re
+import sys
 
 import pytest
 
@@ -249,6 +250,60 @@ def test_html_table_caption_header_and_footnote():
         u for u in loaders.html_units(BOOKSHELF) if u.kind != "table"]
 
 
+def test_html_rowspan_is_carried_down_within_its_row_group():
+    """NCI Table 5: a stage cell spans its rows. Without expansion the
+    second row read "T2 | N1 | M0" - T2 under Stage, and no stage."""
+    html = ("<main><h2>Staging</h2><table><thead>"
+            "<tr><th>Stage</th><th>T</th><th>N</th><th>M</th></tr></thead>"
+            "<tbody><tr><td rowspan='3'>III</td><td>T1</td><td>N1</td><td>M0</td></tr>"
+            "<tr><td>T2</td><td>N1</td><td>M0</td></tr></tbody>"       # rowspan 3, 2 rows
+            "<tbody><tr><td rowspan='0'>IV</td><td>T4</td><td>Any N</td><td>M0</td></tr>"
+            "<tr><td>Any T</td><td>N3</td><td>M0</td></tr></tbody></table></main>")
+    (table,) = [u for u in loaders.html_units(html) if u.kind == "table"]
+    assert table.text.split("\n") == [
+        "Stage | T | N | M",
+        "III | T1 | N1 | M0",
+        "III | T2 | N1 | M0",
+        "IV | T4 | Any N | M0",                 # III does not leak into the next tbody
+        "IV | Any T | N3 | M0",
+    ]
+
+
+def test_expand_spans():
+    def row(*cells):
+        return [c if isinstance(c, tuple) else (c, 1, 1) for c in cells]
+    # a rowspan in a middle column, and one at the end of the row
+    assert loaders.expand_spans([row("a", ("b", 2, 1), "c"), row("d", "e")]) == [
+        ["a", "b", "c"], ["d", "b", "e"]]
+    assert loaders.expand_spans([row("a", ("b", 2, 1)), row("c")]) == [["a", "b"], ["c", "b"]]
+    # a colspan pads, so later cells stay under their own header
+    assert loaders.expand_spans([row(("x", 1, 2), "y")]) == [["x", "", "y"]]
+    assert loaders.expand_spans([row(("x", 2, 2), "y"), row("z")]) == [
+        ["x", "", "y"], ["x", "", "z"]]
+    assert loaders.expand_spans([]) == []
+
+
+def test_html_span_attributes_that_do_not_parse_count_as_one():
+    html = ("<table><tr><th>Site</th><th>Margin</th></tr>"
+            "<tr><td rowspan='two'>Face</td><td colspan='-1'>2 mm</td></tr>"
+            "<tr><td>Trunk</td><td>4 mm</td></tr></table>")
+    (table,) = loaders.html_units(html)
+    assert table.text == "Site | Margin\nFace | 2 mm\nTrunk | 4 mm"
+
+
+@pytest.mark.parametrize("figure", ["<figure>", '<figure class="table">'])
+def test_html_table_in_a_figure_keeps_rows_and_figcaption(figure):
+    """HTML5 captions a table with <figure><figcaption>. A plain figure lost
+    every row; a CKEditor <figure class="table"> lost the caption."""
+    html = (f"<main><h2>Staging</h2>{figure}<table>"
+            "<thead><tr><th>Stage</th><th>Size</th></tr></thead>"
+            "<tbody><tr><td>T1</td><td>&lt;2 cm</td></tr><tr><td>T2</td><td>2-4 cm</td></tr>"
+            "</tbody></table><figcaption>Table 1. Stages</figcaption></figure></main>")
+    units = loaders.html_units(html)
+    assert [(u.kind, u.text) for u in units] == [
+        ("table", "Table 1. Stages\nStage | Size\nT1 | <2 cm\nT2 | 2-4 cm")]
+
+
 def test_html_long_table_is_split_into_row_groups(monkeypatch):
     monkeypatch.setattr(config, "CHUNK_TARGET_CHARS", 160)
     rows = "".join(f"<tr><td>1731{i}</td><td>Mohs stage {i}, each additional block</td></tr>"
@@ -340,6 +395,73 @@ def test_html_repeated_text_under_one_locator_is_kept_once():
     html = ("<main><h2>BCC</h2><h3>References</h3><ul><li>Same citation, 2001.</li></ul>"
             "<h2>SCC</h2><h3>References</h3><ul><li>Same citation, 2001.</li></ul></main>")
     assert texts(loaders.html_units(html), "reference") == ["Same citation, 2001."]
+
+
+def chunk_place(chunk):
+    """What a chunk ID hashes besides the text (ingest.chunk_records): the
+    page, else the section path, else the locator."""
+    if chunk["page"] is not None:
+        return chunk["page"]
+    return " > ".join(chunk["section"]) or chunk["locator"]
+
+
+def test_html_same_text_under_same_named_subsections_is_kept_in_both():
+    """NCI PDQ lists the same cryosurgery contraindications under BCC and
+    under SCC, each in an <h3>Cryosurgery</h3>. Keyed on the innermost
+    heading alone, the SCC copy was dropped as a duplicate."""
+    section = ("<h3>Cryosurgery</h3><p>Contraindications for cryosurgery include:</p>"
+               "<ul><li>Abnormal cold tolerance.</li><li>Raynaud disease.</li></ul>")
+    html = f"<main><h1>PDQ</h1><h2>Treatment of BCC</h2>{section}<h2>Treatment of SCC</h2>{section}</main>"
+    units = loaders.html_units(html)
+    raynaud = [u.section for u in units if u.text == "Raynaud disease."]
+    assert raynaud == [("PDQ", "Treatment of BCC", "Cryosurgery"),
+                       ("PDQ", "Treatment of SCC", "Cryosurgery")]
+    chunks = chunking.pack(units, config.CHUNK_TARGET_CHARS, config.CHUNK_OVERLAP_CHARS,
+                           config.CHUNK_MIN_CHARS)
+    scc = [c["text"] for c in chunks if c["section"][1] == "Treatment of SCC"]
+    assert len(scc) == 1 and "include: Abnormal cold tolerance. Raynaud disease." in scc[0]
+    keys = [(chunk_place(c), c["text"]) for c in chunks]
+    assert len(keys) == len(set(keys))                    # still no duplicate chunk IDs
+
+
+def test_repeated_text_on_one_pdf_page_is_kept_once():
+    """A PDF chunk ID hashes the page, not the section: the same text twice
+    on one page stays one unit, whatever headings sit between."""
+    def line(text, y, bold=False):
+        return {"text": text, "size": 10, "bold": bold, "y0": y, "y1": y + 12}
+    page = [line("Results", 300, bold=True), line("See the table below for codes.", 325),
+            line("Methods", 360, bold=True), line("See the table below for codes.", 385)]
+    units = loaders.pdf_units([(800, page)])
+    assert texts(units) == ["See the table below for codes."]
+
+
+def test_html_content_inside_a_form_is_kept():
+    """The Medicare Coverage Database wraps a whole LCD in ASP.NET's
+    <form id="frmMainForm">; deleting forms deleted the document."""
+    html = ('<html><body><header>MCD HEADER</header><main>'
+            '<form method="post" id="frmMainForm">'
+            '<input type="hidden" name="__VIEWSTATE" value="dDwtMTA4">'
+            '<h1>Mohs Micrographic Surgery (MMS)</h1><h2>Coverage Guidance</h2>'
+            '<p>Mohs surgery is covered for tumors in anatomic locations where '
+            'tissue sparing matters.</p>'
+            '<label>Comments</label><textarea name="c">TEXTAREA TEXT</textarea>'
+            '<button>Print</button></form></main></body></html>')
+    units = loaders.html_units(html)
+    covered = find(units, "Mohs surgery is covered")
+    assert covered.section == ("Mohs Micrographic Surgery (MMS)", "Coverage Guidance")
+    joined = " ".join(texts(units))
+    assert "TEXTAREA TEXT" not in joined and "Print" not in joined
+    assert "MCD HEADER" not in joined
+
+
+def test_html_widget_forms_are_still_removed():
+    html = ('<main><h1>Guide</h1>'
+            '<form role="search"><label>Search the Medicare Coverage Database</label>'
+            '<input name="q"><button>Go</button></form>'
+            '<p>Body text of the guide.</p>'
+            '<form action="/subscribe"><p>Sign up for email updates</p>'
+            '<input type="email"><button>Subscribe</button></form></main>')
+    assert texts(loaders.html_units(html)) == ["Body text of the guide."]
 
 
 # ================================================================ nxml
@@ -461,6 +583,79 @@ def test_docx_reads_body_in_order(tmp_path):
     assert all(u.page is None for u in units)
 
 
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+
+
+def body_xml(xml):
+    """A w:body-level element from XML, with the w: and mc: prefixes declared."""
+    from docx.oxml import parse_xml
+    return parse_xml(xml.replace(">", f' xmlns:w="{W_NS}" xmlns:mc="{MC_NS}">', 1))
+
+
+def run(text):
+    return f'<w:r><w:t xml:space="preserve">{text}</w:t></w:r>'
+
+
+def make_tricky_docx(path):
+    """Content python-docx's Paragraph.text / _Cell.text and a flat body
+    loop miss: content controls (block and inline), custom XML, tracked
+    changes, moves, a text box with its VML fallback, a nested table."""
+    import docx
+    doc = docx.Document()
+    doc.add_paragraph("Clinic Protocol", style="Title")
+    body = doc.element.body
+    sect = body[-1]                                  # w:sectPr stays last
+    for xml in [
+        # a body-level content control holding a heading and a paragraph
+        '<w:sdt><w:sdtPr><w:alias w:val="Dose"/></w:sdtPr><w:sdtContent>'
+        '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>' + run("Anesthesia") + '</w:p>'
+        '<w:p>' + run("Maximum lidocaine dose 7 mg/kg with epinephrine.") + '</w:p>'
+        '</w:sdtContent></w:sdt>',
+        # an empty content control showing its prompt
+        '<w:sdt><w:sdtPr><w:showingPlcHdr/></w:sdtPr><w:sdtContent>'
+        '<w:p>' + run("Click or tap here to enter text.") + '</w:p></w:sdtContent></w:sdt>',
+        '<w:customXml w:element="note"><w:p>' + run("Custom XML paragraph.") + '</w:p></w:customXml>',
+        # a tracked replacement: 5 deleted, 7 inserted
+        '<w:p>' + run("Max dose is ") + '<w:del w:id="1" w:author="a"><w:r><w:delText>5</w:delText>'
+        '</w:r></w:del><w:ins w:id="2" w:author="a">' + run("7") + '</w:ins>' + run(" mg/kg.") + '</w:p>',
+        '<w:p>' + run("Clinic phone: ") + '<w:sdt><w:sdtPr/><w:sdtContent>' + run("555-0100")
+        + '</w:sdtContent></w:sdt></w:p>',
+        '<w:p><w:moveFrom w:id="3" w:author="a">' + run("OLD PLACE") + '</w:moveFrom>'
+        '<w:moveTo w:id="4" w:author="a">' + run("Moved here.") + '</w:moveTo></w:p>',
+        '<w:p>' + run("See box: ") + '<w:r><mc:AlternateContent>'
+        '<mc:Choice Requires="wps"><w:txbxContent><w:p>' + run("BOX TEXT") + '</w:p>'
+        '</w:txbxContent></mc:Choice><mc:Fallback><w:pict><w:txbxContent><w:p>' + run("BOX TEXT")
+        + '</w:p></w:txbxContent></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>',
+    ]:
+        sect.addprevious(body_xml(xml))
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text, table.cell(0, 1).text = "Site", "Margin"
+    table.cell(1, 0).text = "Face"
+    nested = table.cell(1, 1).add_table(rows=2, cols=2)
+    for r, (a, b) in enumerate([("BCC", "2 mm"), ("SCC", "4 mm")]):
+        nested.cell(r, 0).text, nested.cell(r, 1).text = a, b
+    sdt = body_xml("<w:sdt><w:sdtContent/></w:sdt>")      # the table inside a content control
+    table._tbl.addprevious(sdt)
+    sdt[0].append(table._tbl)
+    doc.save(path)
+
+
+def test_docx_reads_content_controls_tracked_changes_and_nested_tables(tmp_path):
+    make_tricky_docx(tmp_path / "t.docx")
+    units = loaders.load_docx(tmp_path / "t.docx")
+    assert [(u.kind, u.text) for u in units] == [
+        ("prose", "Maximum lidocaine dose 7 mg/kg with epinephrine."),
+        ("prose", "Custom XML paragraph."),
+        ("prose", "Max dose is 7 mg/kg."),
+        ("prose", "Clinic phone: 555-0100"),
+        ("prose", "Moved here."),
+        ("prose", "See box: BOX TEXT"),
+        ("table", "Site | Margin\nFace | BCC, 2 mm; SCC, 4 mm"),
+    ]
+    assert units[0].section == ("Clinic Protocol", "Anesthesia")   # heading inside the sdt
+
+
 def test_docx_skip_tables_and_heading_levels(tmp_path):
     make_docx(tmp_path / "p.docx")
     units = loaders.load_docx(tmp_path / "p.docx", skip_tables=True)
@@ -532,6 +727,40 @@ def test_plain_text_without_headings(tmp_path):
     assert [(u.text, u.section, u.locator, u.page) for u in units] == [
         ("First paragraph of notes.", (), "Clinic notes", None),
         ("Second one here.", (), "Clinic notes", None)]
+
+
+def test_markdown_rules_around_plain_text_are_not_front_matter(tmp_path):
+    """A .txt protocol may open with a "---" rule. Only a block that parses
+    as a YAML mapping is front matter; this one used to vanish."""
+    (tmp_path / "wound.txt").write_text(
+        "---\nPOST-OP WOUND CARE\nKeep the pressure dressing dry and in place for 48 hours.\n"
+        "If bleeding occurs, apply firm pressure for 20 minutes without lifting.\n---\n"
+        "Call the clinic if bleeding does not stop.\n")
+    units = loaders.load(source(tmp_path, "wound.txt", "markdown"))
+    joined = " ".join(texts(units))
+    for kept in ("POST-OP WOUND CARE", "48 hours", "20 minutes", "does not stop"):
+        assert kept in joined
+    assert texts(loaders.markdown_units("---\nIntro line\n...\nMore text\n")) == [
+        "Intro line ... More text"]
+
+
+def test_markdown_byte_order_mark_is_dropped(tmp_path):
+    """Notepad's "UTF-8 with BOM": the BOM hid both the front matter and
+    the first heading."""
+    (tmp_path / "a.md").write_bytes(
+        "---\ntitle: x\nauthor: secret\n---\n# Heading\n\nBody text here.\n".encode("utf-8-sig"))
+    units = loaders.load(source(tmp_path, "a.md", "markdown"))
+    assert [(u.text, u.section) for u in units] == [("Body text here.", ("Heading",))]
+    units = loaders.markdown_units("\ufeff# Wound care\n\nKeep it dry.\n")
+    assert [(u.text, u.section) for u in units] == [("Keep it dry.", ("Wound care",))]
+
+
+def test_markdown_front_matter_without_pyyaml(monkeypatch):
+    monkeypatch.setitem(sys.modules, "yaml", None)          # import yaml -> ImportError
+    units = loaders.markdown_units("---\ntitle: Day protocol\ntags:\n  - mohs\n---\nBody.\n")
+    assert texts(units) == ["Body."]
+    units = loaders.markdown_units("---\nPOST-OP WOUND CARE\nKeep it dry.\n---\nBody.\n")
+    assert "Keep it dry." in " ".join(texts(units))
 
 
 def test_markdown_exclude_sections_drops_subsections():
@@ -693,6 +922,54 @@ def test_furniture_needs_repetition_in_the_margin():
     assert found == {"running title"}                     # body repeats too, but not in the margin
 
 
+def pdf_line(text, y, size=10):
+    return {"text": text, "size": size, "bold": False, "y0": y, "y1": y + 12}
+
+
+def table_row(y, *cells):
+    """PyMuPDF gives every table cell its own line, all on one baseline."""
+    return [pdf_line(c, y) for c in cells]
+
+
+def test_pdf_table_cells_in_the_margin_band_are_not_page_furniture():
+    """Table cells near the top / bottom of a page sit in the 15% band.
+    "IV", "IM", "mL", "5", "II" passed for page numbers and "2 g" / "1 g"
+    (digits removed: "g") for a running header; all were dropped."""
+    body = [pdf_line(f"Prophylaxis paragraph line {i} of the dosing guidance.", 300 + 14 * i)
+            for i in range(4)]
+    page1 = body + table_row(640, "Drug", "Dose", "Route") + table_row(656, "Cefazolin", "2 g", "IV") \
+        + table_row(672, "Lidocaine 1%", "5", "mL") + [pdf_line("Page 1 of 2", 760)]
+    page2 = table_row(60, "Ceftriaxone", "1 g", "IM") + table_row(76, "Stage", "II", "III") \
+        + body + [pdf_line("Page 2 of 2", 760)]
+    units = loaders.pdf_units([(792, page1), (792, page2)])
+    joined = " ".join(texts(units))
+    assert "Cefazolin 2 g IV" in joined
+    assert "Lidocaine 1% 5 mL" in joined
+    assert "Ceftriaxone 1 g IM" in joined and "Stage II III" in joined
+    assert "Page 1 of 2" not in joined and "Page 2 of 2" not in joined
+    assert "g" not in loaders.furniture_texts([(792, page1), (792, page2)])
+
+
+def test_pdf_page_numbers_must_be_alone_and_outside_the_text_block():
+    """A roman page number set off below the body goes; the same "iv" as
+    the last body line (no gap above it) stays."""
+    def body(y):
+        return [pdf_line(f"Body line {i} of the front matter text", y + 14 * i) for i in range(4)]
+    units = loaders.pdf_units([(792, body(300) + [pdf_line("iv", 760)])])
+    assert not re.search(r"\biv\b", " ".join(texts(units)))
+    # The band starts at y 673; "iv" at 696 runs on from the body, no gap.
+    units = loaders.pdf_units([(792, body(640) + [pdf_line("iv", 696)])])
+    assert " ".join(texts(units)).endswith("Body line 3 of the front matter text iv")
+
+
+def test_page_number_regex_only_valid_roman_numerals():
+    match = lambda t: bool(loaders._PAGE_NUMBER_RE.match(t))
+    for page in ("12", "iv", "XII", "xlix", "Page 3", "Page 3 of 10", "7 / 20"):
+        assert match(page), page
+    for not_page in ("mL", "IM", "ID", "mild", "lid", "iiii", "vx", "dc", "MD"):
+        assert not match(not_page), not_page
+
+
 # ======================================================== pack() on top
 def test_pack_over_loader_output_never_crosses_sections():
     """Many paragraphs per section, each tagged with its section's token;
@@ -721,7 +998,7 @@ def test_pack_over_html_and_pdf_units_keeps_kinds_and_places(pdf_units):
         assert chunks
         for c in chunks:
             assert (c["section"], c["locator"], c["page"], c["kind"]) in places
-        keys = [(c["page"] if c["page"] is not None else c["locator"], c["text"]) for c in chunks]
+        keys = [(chunk_place(c), c["text"]) for c in chunks]
         assert len(keys) == len(set(keys))                # no duplicate chunk IDs
 
 

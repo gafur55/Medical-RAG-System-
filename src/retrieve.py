@@ -14,6 +14,7 @@ similarity - exactly what it was before any of them existed.
 Run:  python3 -m src.retrieve "Karapandzic flap"
 """
 
+import hashlib
 import json
 import math
 import re
@@ -21,15 +22,19 @@ import sys
 from collections import Counter
 
 import numpy as np
-from src import config
+# embed.py imports only numpy and config (it loads the model lazily), so
+# the app - and the HF Space - can check content keys and the vectors
+# digest at load time without importing sentence-transformers or PyYAML.
+from src import config, embed
 
 
 _model = None
 _chunks = None
 _vectors = None
 # Things computed from the chunks once and reused by every query (the
-# front-matter mask, the BM25 statistics). Keyed on the chunks list itself,
-# so a reloaded - or, in tests, a faked - index never sees stale ones.
+# front-matter mask, the BM25 statistics, the index_id of what was loaded).
+# Keyed on the chunks list itself, so a reloaded - or, in tests, a faked -
+# index never sees stale ones.
 _derived = {}
 
 
@@ -91,49 +96,127 @@ def read_vector_keys(path=None):
         return None
 
 
+def _first_difference(a, b):
+    """Index of the first position where two lists differ (or the shorter
+    one's length, when one is a prefix of the other)."""
+    return next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+
+
+def alignment_problem(chunks, vectors, vector_keys=None):
+    """Why row i of vectors may not describe chunks[i], as one sentence
+    ending in the fix - or None when every row does. Reads no files.
+
+    check_alignment() raises it; `ingest --list` prints it, so the status
+    command cannot give an all-clear that the app would refuse.
+
+    With vector_keys.json (written by embed.py) the check is exact, and the
+    first failure is reported:
+      model   the vectors come from config.EMBEDDING_MODEL
+      rows    the key file lists one id per row of vectors.npy
+      digest  vectors.npy is the file the key file was written with - not
+              the result of an embed run that died between its two writes,
+              or of restoring one file without the other
+      ids     the chunk ids, in order: catches ingest re-run without embed
+      keys    the content key of what embed.py would embed for each chunk
+              now. A chunk id hashes the source, the page (or section) and
+              the text - not EMBED_SECTION_HEADINGS, nor, for a paginated
+              source, the heading path - while the embedded text includes
+              both. Rename a heading, or flip the flag, and the ids still
+              match vectors of the old text; the keys do not.
+    Key files written before "keys" or "vectors_sha256" existed skip that
+    step, as before. A legacy index has no keys file, so all we can compare
+    is the count - which misses a re-chunk that happens to keep the same
+    number of chunks, but is what we always had.
+    """
+    fix = "re-run: python3 -m src.embed"
+    if vector_keys is None:
+        if len(chunks) != len(vectors):
+            return f"{len(chunks)} chunks but {len(vectors)} vectors - {fix}"
+        return None
+
+    model = vector_keys.get("embedding_model")
+    if model and model != config.EMBEDDING_MODEL:
+        return (f"vectors were embedded with {model} but config.EMBEDDING_MODEL "
+                f"is {config.EMBEDDING_MODEL} - {fix}")
+    ids = vector_keys.get("ids") or []
+    if len(ids) != len(vectors):
+        return (f"vector_keys.json lists {len(ids)} ids but vectors.npy has "
+                f"{len(vectors)} rows - {fix}")
+    digest = vector_keys.get("vectors_sha256")
+    if digest is not None and digest != embed.vectors_digest(vectors):
+        return ("vectors.npy is not the file vector_keys.json was written with (an embed "
+                "run died between its two writes, or one was restored without the other) "
+                f"- {fix}")
+    chunk_ids = [c["id"] for c in chunks]
+    if ids != chunk_ids:
+        where = _first_difference(ids, chunk_ids)
+        return (f"vectors.npy does not match chunks.json ({len(chunk_ids)} chunks, "
+                f"{len(ids)} vectors, first difference at row {where}) - {fix}")
+    keys = vector_keys.get("keys")
+    if keys is not None:
+        expected = embed.chunk_keys(chunks, model or config.EMBEDDING_MODEL)
+        if keys != expected:
+            return ("vectors.npy was embedded from different text than chunks.json now gives "
+                    "(a section heading or config.EMBED_SECTION_HEADINGS changed?), first "
+                    f"difference at row {_first_difference(keys, expected)} - {fix}")
+    return None
+
+
 def check_alignment(chunks, vectors, vector_keys=None):
     """Raise IndexMismatch unless row i of vectors describes chunks[i].
 
     If you re-run ingest.py and forget embed.py, row 847 of the vector array
     no longer describes chunk 847 and every result is quietly wrong. Loud
-    failure beats silent nonsense.
-
-    With vector_keys.json (written by embed.py) the check is exact: its ids
-    must equal the chunk ids, in order. A legacy index has no keys file, so
-    all we can compare is the count - which misses a re-chunk that happens
-    to keep the same number of chunks, but is what we always had.
+    failure beats silent nonsense. What is checked: alignment_problem().
     """
-    fix = "re-run: python3 -m src.embed"
-    if vector_keys is None:
-        if len(chunks) != len(vectors):
-            raise IndexMismatch(f"{len(chunks)} chunks but {len(vectors)} vectors - {fix}")
-        return
+    problem = alignment_problem(chunks, vectors, vector_keys)
+    if problem:
+        raise IndexMismatch(problem)
 
-    model = vector_keys.get("embedding_model")
-    if model and model != config.EMBEDDING_MODEL:
-        raise IndexMismatch(f"vectors were embedded with {model} but config.EMBEDDING_MODEL "
-                            f"is {config.EMBEDDING_MODEL} - {fix}")
-    ids = vector_keys.get("ids") or []
-    if len(ids) != len(vectors):
-        raise IndexMismatch(f"vector_keys.json lists {len(ids)} ids but vectors.npy has "
-                            f"{len(vectors)} rows - {fix}")
-    chunk_ids = [c["id"] for c in chunks]
-    if ids != chunk_ids:
-        where = next((i for i, (a, b) in enumerate(zip(ids, chunk_ids)) if a != b),
-                     min(len(ids), len(chunk_ids)))
-        raise IndexMismatch(f"vectors.npy does not match chunks.json ({len(chunk_ids)} chunks, "
-                            f"{len(ids)} vectors, first difference at row {where}) - {fix}")
+
+def index_id(ids):
+    """12 hex chars naming one build: changes when any chunk ID or the order
+    changes. Logged with every answer and score run.
+
+    ingest.py writes it into manifest.json. It lives here so the app can
+    name the index it actually loaded (loaded_index_id) without importing
+    ingest.py - and with it the registry and PyYAML.
+    """
+    return hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()[:12]
+
+
+def _index_id_of(chunks):
+    return index_id([c["id"] for c in chunks])
 
 
 def get_index():
-    """Load chunks + vectors once, and check they still match."""
+    """Load chunks + vectors once, and check they still match. The index_id
+    of what was loaded is recorded at the same moment (loaded_index_id)."""
     global _chunks, _vectors
     if _chunks is None:
         chunks = json.loads(config.CHUNKS_PATH.read_text())
         vectors = np.load(config.VECTORS_PATH)
         check_alignment(chunks, vectors, read_vector_keys())
         _chunks, _vectors = chunks, vectors
+        derived(chunks, "index_id", _index_id_of)
     return _chunks, _vectors
+
+
+def loaded_index_id():
+    """index_id() of the chunks this process searches, or None before
+    get_index() has loaded any.
+
+    get_index() loads the index once and keeps it, while manifest.json
+    (config.index_id) is re-read from disk on every call. Rebuild the index
+    while the app runs - ingest + embed in another terminal - and the
+    manifest names the new build while every answer still comes from the
+    old one. generate.py stamps answers with this instead. Cached per
+    chunks list, like the other derived() values, so it can never describe
+    a different index than the one in memory.
+    """
+    if _chunks is None:
+        return None
+    return derived(_chunks, "index_id", _index_id_of)
 
 
 def derived(chunks, name, build):

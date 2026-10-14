@@ -412,6 +412,95 @@ def test_first_report_counts_everything_as_new():
     assert a["new"] == 5 and a["newly_graded"] == 3
 
 
+HARMFUL_GRADE = "Potentially harmful - could lead to a bad decision"
+
+
+def test_activity_stores_what_it_saw_for_tomorrow():
+    a = report.activity(SESSIONS, {"listed_test"}, QUESTIONS, since=None)
+    assert a["seen_ids"] == ["dupe", "new_harmful", "new_misleading", "new_ungraded", "old_real"]
+    assert a["graded_seen"] == [["new_harmful", "Potentially harmful"],
+                                ["new_misleading", "Misleading"],
+                                ["old_real", "Correct and complete"]]
+    assert json.loads(json.dumps(a["graded_seen"])) == a["graded_seen"]   # survives the .json
+
+
+def test_activity_decides_new_by_identity_when_the_previous_report_kept_ids():
+    """A grade made before the previous report but copied down from the Hub
+    after it is still new; a grade the previous report already showed is
+    not, even if its graded_at is later (a second run the same night)."""
+    records = [
+        {"id": "late_grade", "timestamp": ts(-30), "question": "Ear cartilage graft?",
+         "grade": "Potentially harmful - could lead to a bad decision", "graded_at": ts(-20),
+         "comment": "Wrong donor site."},
+        {"id": "late_question", "timestamp": ts(-10), "question": "Scalp flap?", "grade": None},
+        {"id": "shown", "timestamp": ts(-30), "question": "Nasal ala repair",
+         "grade": "Misleading - sourced, but creates the wrong impression", "graded_at": ts(1)},
+        {"id": "regraded", "timestamp": ts(-30), "question": "Lower lip repair",
+         "grade": "Misleading - sourced, but creates the wrong impression", "graded_at": ts(-20)},
+    ]
+    prev_act = {"seen_ids": ["late_grade", "shown", "regraded"],
+                "graded_seen": [["shown", "Misleading"], ["regraded", "Correct and complete"]]}
+    a = report.activity(records, set(), QUESTIONS, since=T0, prev_act=prev_act)
+    assert [r["id"] for r in a["new_records"]] == ["late_question"]
+    assert a["candidates"] == ["Scalp flap?"]
+    assert [r["id"] for r in a["harmful"]] == ["late_grade"]
+    assert [r["id"] for r in a["misleading"]] == ["regraded"]      # the grade changed
+    assert a["newly_graded"] == 2
+
+
+def test_activity_falls_back_to_time_for_older_reports_and_records_without_id():
+    old_format = {"real": 5, "graded": 3, "harmful": 0}             # no seen_ids stored
+    assert report.previously_seen(old_format) == (None, None)
+    assert report.previously_seen(None) == (None, None)
+    a = report.activity(SESSIONS, {"listed_test"}, QUESTIONS, since=T0, prev_act=old_format)
+    assert a["new"] == 3 and a["newly_graded"] == 2                 # as by time alone
+
+    # A record with no id cannot be matched, so time decides for it.
+    no_id = {"timestamp": ts(-30), "question": "q", "grade": HARMFUL_GRADE, "graded_at": ts(1)}
+    a = report.activity([no_id], set(), QUESTIONS, since=T0,
+                        prev_act={"seen_ids": [], "graded_seen": []})
+    assert a["new"] == 0 and a["newly_graded"] == 1 and len(a["harmful"]) == 1
+    assert a["seen_ids"] == [] and a["graded_seen"] == []
+
+
+def test_late_hub_grade_is_reported_once_across_nights(env, monkeypatch, capsys):
+    """Review scenario: graded Potentially harmful on the hosted app on
+    Monday evening, the local sessions.jsonl copied down from the Hub only
+    after Tuesday's report. By time alone no night ever listed it."""
+    sessions = env.eval_dir / "sessions.jsonl"
+    asked = {"id": "hub_rec", "timestamp": ts(-8), "question": "Ear cartilage graft?",
+             "grade": None}
+    write_jsonl(sessions, [asked])
+    nights = iter([T0, T0 + timedelta(days=1), T0 + timedelta(days=2)])
+    monkeypatch.setattr(report, "now_utc", lambda: next(nights))
+
+    report.main(["--skip-llm"])
+    first = json.loads((env.reports_dir / "2026-10-13.json").read_text())
+    assert first["activity"]["seen_ids"] == ["hub_rec"]
+    assert first["activity"]["graded_seen"] == []
+
+    # Wednesday morning: the Hub copy replaces the local file. The grade was
+    # made before the first report ran; a late question came with it.
+    write_jsonl(sessions, [
+        {**asked, "grade": HARMFUL_GRADE, "graded_at": ts(-7), "comment": "Wrong donor site.",
+         "graded_by": "Dr X"},
+        {"id": "hub_late_q", "timestamp": ts(-6), "question": "Scalp flap?", "grade": None},
+    ])
+    report.main(["--skip-llm"])
+    second = json.loads((env.reports_dir / "2026-10-14.json").read_text())
+    text = (env.reports_dir / "2026-10-14.md").read_text()
+    assert second["activity"]["harmful"] == 1 and second["activity"]["newly_graded"] == 1
+    assert "Potentially harmful" in second["action_items"][0]
+    assert "Wrong donor site." in text
+    assert second["activity"]["candidates"] == 1 and "Scalp flap?" in text
+
+    report.main(["--skip-llm"])                    # nothing changed: nothing repeated
+    third = json.loads((env.reports_dir / "2026-10-15.json").read_text())
+    assert third["activity"]["harmful"] == 0 and third["activity"]["new"] == 0
+    assert third["activity"]["candidates"] == 0
+    assert not any(report.HARMFUL in i for i in third["action_items"])
+
+
 def test_after_treats_unreadable_times_as_old():
     assert report.after("garbage", T0) is False
     assert report.after(None, None) is True

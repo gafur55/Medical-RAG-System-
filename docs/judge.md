@@ -162,7 +162,14 @@ answer call had backoff; it now has.)
 - **The deterministic checks are heuristics too.**
   - The refusal detector looks for phrases like "the excerpts do not
     contain" in the opening 250 characters, or anywhere in an answer that
-    cites nothing. A refusal worded some other way is missed.
+    cites nothing. Every phrase must name the material ("excerpts",
+    "provided text", "the context" but not "in the context of") or answering
+    itself ("I cannot answer"), so clinical wording such as "the extent cannot
+    be determined clinically" or "the textbook notes a graft lacks support"
+    is not a refusal. It errs that way on purpose: a false refusal on an
+    out-of-scope question would hide a `failed_refusal`. A refusal worded
+    some other way is missed, and shows up under "judge and refusal detector
+    disagree".
   - A bracketed number past the last excerpt counts as fabricated — including
     a reference number copied out of the textbook ("[12]") or a year
     ("[2019]"). Page style forbids square brackets, so in page style any

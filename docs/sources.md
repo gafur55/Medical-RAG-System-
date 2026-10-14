@@ -189,12 +189,19 @@ chunks of about `CHUNK_TARGET_CHARS` (1000) characters that never cross a
 section or a page, consecutive prose chunks overlapping by up to
 `CHUNK_OVERLAP_CHARS` (150) characters of whole sentences, pieces under
 `CHUNK_MIN_CHARS` (50) merged or dropped. Captions, references and tables
-are chunks of their own, so retrieval can filter on `kind`.
+are chunks of their own, so retrieval can filter on `kind`. By default
+(`RETRIEVE_KINDS` in `src/config.py`) prose, captions and tables are
+searched — a staging table or a treatment-options table can be an answer —
+and references are indexed but not searched.
 
-Chunk IDs: `chunking.chunk_id(source_id, page, text)` for paginated sources,
-`chunking.chunk_id(source_id, locator, text)` for the rest. The same text
-twice at the same place in one source is a duplicate ID — ingest refuses and
-names the source and locator.
+Chunk IDs: `chunking.chunk_id(source_id, page, text)` for paginated sources;
+for the rest the ID hashes the section path (the locator when there is
+none) instead of the page, so the same paragraph under a same-named
+subsection of two sections (NCI's "Cryosurgery" under both BCC and SCC) is
+two chunks, and the loaders keep both. A reference repeated in two
+sections' reference lists is kept once. The same text twice at the same
+place in one source is a duplicate ID — ingest refuses and names the source
+and locator.
 
 ### Loader options
 
@@ -203,8 +210,10 @@ error, so a typo cannot silently do nothing.
 
 ```yaml
 options:
-  skip_tables: true          # drop tables and their captions, e.g. the ICD-10
-                             # code lists in a Medicare billing article
+  skip_tables: true          # drop tables and their captions. Tables are
+                             # searched like prose, so long ones can crowd it
+                             # out of the results - e.g. the ICD-10 code lists
+                             # in a Medicare billing article
   exclude_sections:          # drop these headings' content, subsections included
     - Continuing Education Activity
     - Review Questions

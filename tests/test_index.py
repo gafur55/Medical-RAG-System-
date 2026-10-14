@@ -14,7 +14,7 @@ import json
 import numpy as np
 import pytest
 
-from src import chunking, config, embed, ingest
+from src import chunking, config, embed, ingest, retrieve
 from src.chunking import Unit
 from src.sources import Source
 
@@ -70,7 +70,8 @@ def test_chunk_records_fields_and_ids():
                                               section=("Indications", "Tumors"),
                                               locator="Tumors")])
     assert rec == {
-        "id": chunking.chunk_id("statpearls_demo", "Tumors", "Mohs is done in stages."),
+        "id": chunking.chunk_id("statpearls_demo", "Indications > Tumors",
+                                "Mohs is done in stages."),
         "book": "statpearls_demo",
         "source": "statpearls_demo",
         "domain": "operations",
@@ -90,6 +91,10 @@ def test_chunk_records_paginated_id_uses_page():
                                               page=12)])
     assert rec["id"] == chunking.chunk_id("cms_demo", 12, "Bundling rule.")
     assert rec["page"] == 12 and rec["locator"] == "p. 12"
+    # A paginated source's ID hashes the page only, whatever its headings.
+    (titled,) = ingest.chunk_records(src, [piece("Bundling rule.", section=("E.", "Mohs"),
+                                                 locator="p. 12", page=12)])
+    assert titled["id"] == rec["id"]
 
 
 def test_chunk_records_fills_an_empty_locator():
@@ -101,8 +106,9 @@ def test_chunk_records_fills_an_empty_locator():
     ])
     assert by_page["locator"] == "p. 3"
     assert by_section["locator"] == "Sub"
-    assert by_section["id"] == chunking.chunk_id("demo", "Sub", "b")
+    assert by_section["id"] == chunking.chunk_id("demo", "Top > Sub", "b")
     assert bare["locator"] == ""
+    assert bare["id"] == chunking.chunk_id("demo", "", "c")
 
 
 def test_same_text_in_another_section_is_another_chunk():
@@ -111,6 +117,20 @@ def test_same_text_in_another_section_is_another_chunk():
                                       piece("Same text.", locator="B", section=("B",))])
     assert a["id"] != b["id"]
     assert ingest.duplicate_ids([a, b]) == []
+
+
+def test_same_text_under_same_named_subsections_is_two_chunks():
+    """NCI's PDQ page has "Cryosurgery" under both BCC and SCC with the
+    same contraindication list. The locator is only the innermost heading,
+    so hashing it gave both chunks one ID; the section path tells them apart."""
+    src = make_source("nci_demo", fmt="html")
+    text = "Contraindications for cryosurgery include abnormal cold tolerance."
+    bcc, scc = ingest.chunk_records(src, [
+        piece(text, section=("Basal cell carcinoma", "Cryosurgery"), locator="Cryosurgery"),
+        piece(text, section=("Squamous cell carcinoma", "Cryosurgery"), locator="Cryosurgery")])
+    assert bcc["id"] != scc["id"]
+    assert ingest.duplicate_ids([bcc, scc]) == []
+    assert bcc["locator"] == scc["locator"] == "Cryosurgery"      # what readers see is unchanged
 
 
 def test_duplicate_ids_names_source_and_locator():
@@ -160,6 +180,8 @@ def test_index_id_follows_ids_and_order():
     assert ingest.index_id(["a", "b"]) != ingest.index_id(["b", "a"])
     assert len(ingest.index_id(["a"])) == 12
     assert ingest.index_id(["a", "b"]) == ingest.index_id(["a", "b"])
+    # One definition: the id the app stamps on answers is the manifest's.
+    assert ingest.index_id is retrieve.index_id
 
 
 def test_build_manifest():
@@ -245,14 +267,43 @@ def test_format_status_clean_and_no_manifest():
     assert "run: python3 -m src.ingest" in out
 
 
+def vp_chunks(*ids, section=None):
+    return [{"id": i, "source": "demo", "page": None, "kind": "prose", "text": f"text {i}",
+             "section": list(section or []), "figures": []} for i in ids]
+
+
 def test_vector_problem():
-    ids = ["a", "b"]
-    assert ingest.vector_problem(ids, ["a", "b"], 2) is None
+    chunks = vp_chunks("a", "b")
+    two, three = np.zeros((2, 3), dtype=np.float32), np.zeros((3, 3), dtype=np.float32)
+    keys = embed.with_digest(embed.keys_record(chunks, config.EMBEDDING_MODEL), two)
+    assert ingest.vector_problem(chunks, two, keys) is None
     assert ingest.vector_problem(None, None, None) is None          # no index at all
-    assert "no vectors.npy" in ingest.vector_problem(ids, None, None)
-    assert "out of date" in ingest.vector_problem(ids, ["b", "a"], 2)
-    assert "3 rows for 2 chunks" in ingest.vector_problem(ids, None, 3)
-    assert "no vector_keys.json" in ingest.vector_problem(ids, None, 2)
+    assert "no vectors.npy" in ingest.vector_problem(chunks, None, None)
+    assert "first difference at row 0" in ingest.vector_problem(vp_chunks("b", "a"), two, keys)
+    assert "3 rows for 2 chunks" in ingest.vector_problem(chunks, three, None)
+    assert "no vector_keys.json" in ingest.vector_problem(chunks, two, None)
+
+
+def test_vector_problem_reports_what_the_app_would_refuse(monkeypatch):
+    """--list used to stop at the ids: same ids meant "no problems", while
+    the app refused the index for its model or its row count."""
+    chunks = vp_chunks("a", "b", "c")
+    vectors = np.zeros((3, 3), dtype=np.float32)
+    keys = embed.keys_record(chunks, config.EMBEDDING_MODEL)
+    assert ingest.vector_problem(chunks, vectors, keys) is None
+
+    problem = ingest.vector_problem(chunks, vectors[:2], keys)
+    assert "lists 3 ids but vectors.npy has 2 rows" in problem and "src.embed" in problem
+    problem = ingest.vector_problem(chunks, vectors, {**keys, "embedding_model": "old/model"})
+    assert "embedded with old/model" in problem and "src.embed" in problem
+    problem = ingest.vector_problem(vp_chunks("a", "b", "c", section=["Renamed"]), vectors, keys)
+    assert "different text" in problem
+    digested = embed.with_digest(keys, vectors + 1)
+    assert "not the file vector_keys.json" in ingest.vector_problem(chunks, vectors, digested)
+
+    monkeypatch.setattr(config, "EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+    assert "but config.EMBEDDING_MODEL is BAAI/bge-base-en-v1.5" in \
+        ingest.vector_problem(chunks, vectors, keys)
 
 
 # ------------------------------------------------------- main(), end to end
@@ -281,6 +332,15 @@ sources:
     format: html
     path: raw/second.html
     license: public domain
+"""
+THIRD_SOURCE_YAML = """
+  - id: third
+    title: Third document
+    type: protocol
+    domain: operations
+    format: markdown
+    path: raw/first.md
+    license: internal
 """
 
 
@@ -368,6 +428,26 @@ def test_main_list(registry_dir, capsys):
     assert "no vectors.npy" in out
 
 
+def test_main_list_reports_model_and_row_count_mismatch(registry_dir, monkeypatch, capsys):
+    ingest.main([])
+    embed.main([], encode=FakeEncoder())
+    capsys.readouterr()
+    ingest.main(["--list"])
+    assert capsys.readouterr().out.rstrip().endswith("no problems")
+
+    model = config.EMBEDDING_MODEL
+    monkeypatch.setattr(config, "EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+    ingest.main(["--list"])
+    out = capsys.readouterr().out
+    assert f"vectors were embedded with {model}" in out and "no problems" not in out
+
+    monkeypatch.setattr(config, "EMBEDDING_MODEL", model)
+    np.save(config.VECTORS_PATH, np.load(config.VECTORS_PATH)[:1])
+    ingest.main(["--list"])
+    out = capsys.readouterr().out
+    assert "lists 2 ids but vectors.npy has 1 rows" in out and "no problems" not in out
+
+
 def test_main_adopts_legacy_vectors_before_overwriting(registry_dir):
     """The old chunks.json is gone after ingest, so adoption has to happen
     first - otherwise the old vectors could never be matched to text."""
@@ -381,6 +461,26 @@ def test_main_adopts_legacy_vectors_before_overwriting(registry_dir):
     assert keys["ids"] == ["old0", "old1", "old2"]
     assert keys["keys"] == [embed.embed_key(config.EMBEDDING_MODEL, f"legacy text {i}")
                             for i in range(3)]
+    assert keys["vectors_sha256"] == embed.vectors_digest(np.eye(3, dtype=np.float32))
+
+
+def test_main_adds_a_missing_digest_before_overwriting(registry_dir):
+    """A key file from before digests existed (today's committed index):
+    ingest records the digest while the old chunks.json still proves the
+    pairing, so the next embed reuses the old rows instead of distrusting
+    them all."""
+    ingest.main([])
+    embed.main([], encode=FakeEncoder())
+    keys = json.loads(config.VECTOR_KEYS_PATH.read_text())
+    config.VECTOR_KEYS_PATH.write_text(json.dumps(
+        {k: v for k, v in keys.items() if k != "vectors_sha256"}, indent=1))
+
+    registry_dir["third"] = [Unit("Brand new paragraph about repairs after Mohs surgery.",
+                                  ("Repair",), "Repair")]
+    config.SOURCES_PATH.write_text(config.SOURCES_PATH.read_text() + THIRD_SOURCE_YAML)
+    ingest.main([])
+    assert json.loads(config.VECTOR_KEYS_PATH.read_text()) == keys
+    assert embed.main([], encode=FakeEncoder()) == {"reused": 2, "embedded": 1, "written": True}
 
 
 def test_build_chunks_signature_keeps_books_fallback():
@@ -489,7 +589,8 @@ def test_main_incremental(index_dir):
     keys = json.loads(config.VECTOR_KEYS_PATH.read_text())
     assert keys == {"embedding_model": model, "ids": ["id0", "id1", "id2"],
                     "keys": [embed.embed_key(model, f"Sec\nchunk text number {i}")
-                             for i in range(3)]}
+                             for i in range(3)],
+                    "vectors_sha256": embed.vectors_digest(first)}
 
     # nothing changed: no model call, no write
     stamp = config.VECTORS_PATH.stat().st_mtime_ns
@@ -531,6 +632,117 @@ def test_main_ignores_a_cache_with_the_wrong_row_count(index_dir):
     assert embed.main([], encode=FakeEncoder())["embedded"] == 2
 
 
+def test_vectors_digest():
+    v = np.arange(6, dtype=np.float32).reshape(2, 3)
+    d = embed.vectors_digest(v)
+    assert len(d) == 64 and embed.vectors_digest(v.copy()) == d
+    assert embed.vectors_digest(v.astype(np.float64)) == d        # what is saved is float32
+    assert embed.vectors_digest(v[::-1]) != d                     # same rows, other order
+    assert embed.vectors_digest(v.reshape(3, 2)) != d             # same bytes, other shape
+    bumped = v.copy()
+    bumped[1, 2] += 1e-3
+    assert embed.vectors_digest(bumped) != d
+
+
+def row_of(chunk):
+    """The vector FakeEncoder gives a chunk's embedded text."""
+    return FakeEncoder()([embed.embed_text(chunk)])[0]
+
+
+def assert_rows_match(chunks):
+    vectors = np.load(config.VECTORS_PATH)
+    assert len(vectors) == len(chunks)
+    for c, row in zip(chunks, vectors):
+        assert np.array_equal(row, row_of(c)), c["id"]
+
+
+def test_main_recovers_from_a_crash_between_the_two_writes(index_dir, monkeypatch):
+    """vectors.npy written, then the run dies before vector_keys.json. With
+    as many chunks as before, the old keys used to pass for labels of the
+    new rows: the re-run reused the wrong rows and saved them as correct."""
+    a, b, c = demo_chunks(3)
+    write_chunks([a, b, c])
+    embed.main([], encode=FakeEncoder())
+
+    x = {"id": "idX", "source": "demo", "page": None, "kind": "prose",
+         "text": "an inserted chunk", "figures": []}
+    write_chunks([x, a, b])
+    replace = embed._replace
+
+    def die_before_the_keys(path, write):
+        if path == config.VECTOR_KEYS_PATH:
+            raise KeyboardInterrupt
+        replace(path, write)
+
+    monkeypatch.setattr(embed, "_replace", die_before_the_keys)
+    with pytest.raises(KeyboardInterrupt):
+        embed.main([], encode=FakeEncoder())
+    monkeypatch.setattr(embed, "_replace", replace)
+
+    keys = json.loads(config.VECTOR_KEYS_PATH.read_text())
+    with pytest.raises(retrieve.IndexMismatch):
+        retrieve.check_alignment([x, a, b], np.load(config.VECTORS_PATH), keys)
+
+    assert embed.main([], encode=FakeEncoder()) == {"reused": 0, "embedded": 3, "written": True}
+    assert_rows_match([x, a, b])
+    retrieve.check_alignment([x, a, b], np.load(config.VECTORS_PATH),
+                             json.loads(config.VECTOR_KEYS_PATH.read_text()))
+
+
+def test_main_distrusts_vectors_restored_without_their_keys(index_dir):
+    """git restore of vectors.npy alone: the key file is newer and names
+    other rows. Ids and keys still match chunks.json, so only the digest
+    can tell - without it embed said "already up to date"."""
+    chunks = demo_chunks(3)
+    write_chunks(chunks)
+    embed.main([], encode=FakeEncoder())
+    old_bytes = config.VECTORS_PATH.read_bytes()
+
+    write_chunks(chunks[::-1])
+    assert embed.main([], encode=FakeEncoder())["written"] is True
+    config.VECTORS_PATH.write_bytes(old_bytes)
+
+    keys = json.loads(config.VECTOR_KEYS_PATH.read_text())
+    with pytest.raises(retrieve.IndexMismatch, match="not the file vector_keys.json"):
+        retrieve.check_alignment(chunks[::-1], np.load(config.VECTORS_PATH), keys)
+    assert embed.main([], encode=FakeEncoder()) == {"reused": 0, "embedded": 3, "written": True}
+    assert_rows_match(chunks[::-1])
+
+
+def test_main_adds_a_missing_digest_without_reembedding(index_dir):
+    """Today's committed index: vector_keys.json without a digest, still
+    describing chunks.json exactly. embed adds the digest, re-embeds
+    nothing and leaves vectors.npy byte for byte."""
+    chunks = legacy_chunks(4)
+    write_chunks(chunks)
+    np.save(config.VECTORS_PATH, np.random.default_rng(0).random((4, 3)).astype(np.float32))
+    before = config.VECTORS_PATH.read_bytes()
+    old = embed.keys_record(chunks, config.EMBEDDING_MODEL)
+    config.VECTOR_KEYS_PATH.write_text(json.dumps(old, indent=1))
+
+    def encode(texts):
+        raise AssertionError("an aligned index must not be re-embedded")
+
+    for _ in range(2):          # the second run finds the digest and changes nothing
+        assert embed.main([], encode=encode) == {"reused": 4, "embedded": 0, "written": False}
+        assert config.VECTORS_PATH.read_bytes() == before
+        keys = json.loads(config.VECTOR_KEYS_PATH.read_text())
+        assert keys == {**old, "vectors_sha256": embed.vectors_digest(np.load(config.VECTORS_PATH))}
+    retrieve.check_alignment(chunks, np.load(config.VECTORS_PATH), keys)
+
+
+def test_a_stale_key_file_without_digest_is_not_trusted(index_dir):
+    chunks = demo_chunks(3)
+    np.save(config.VECTORS_PATH, np.zeros((3, 3), dtype=np.float32))
+    stale = embed.keys_record(chunks, config.EMBEDDING_MODEL)
+    config.VECTOR_KEYS_PATH.write_text(json.dumps(stale))
+    write_chunks(chunks[1:] + chunks[:1])          # ingest re-run since: same 3, reordered
+
+    assert embed.add_missing_digest() is False
+    assert json.loads(config.VECTOR_KEYS_PATH.read_text()) == stale
+    assert embed.main([], encode=FakeEncoder())["embedded"] == 3
+
+
 def test_main_adopts_a_legacy_index_without_the_model(index_dir):
     """Today's state: vectors.npy, an old-style chunks.json, no key file."""
     legacy = [{"id": f"t{i}", "book": "mohs_layers", "page": i, "kind": "prose",
@@ -554,6 +766,7 @@ def test_adopt_legacy_requires_matching_counts(index_dir):
     assert embed.adopt_legacy(chunks, np.zeros((2, 3)), model="m") is True
     keys = json.loads(config.VECTOR_KEYS_PATH.read_text())
     assert keys["embedding_model"] == "m" and keys["ids"] == ["id0", "id1"]
+    assert keys["vectors_sha256"] == embed.vectors_digest(np.zeros((2, 3)))
 
 
 def legacy_chunks(n):
@@ -592,16 +805,7 @@ def test_ingest_then_embed_after_adding_a_source(registry_dir):
 
     registry_dir["third"] = [Unit("Brand new paragraph about repairs after Mohs surgery.",
                                   ("Repair",), "Repair")]
-    yaml_text = config.SOURCES_PATH.read_text() + """
-  - id: third
-    title: Third document
-    type: protocol
-    domain: operations
-    format: markdown
-    path: raw/first.md
-    license: internal
-"""
-    config.SOURCES_PATH.write_text(yaml_text)
+    config.SOURCES_PATH.write_text(config.SOURCES_PATH.read_text() + THIRD_SOURCE_YAML)
     ingest.main([])
     encode = FakeEncoder()
     assert embed.main([], encode=encode) == {"reused": 2, "embedded": 1, "written": True}
@@ -630,4 +834,8 @@ def test_real_index_vector_keys_match_if_present():
         pytest.skip("no vector_keys.json yet - legacy index")
     keys = json.loads(config.VECTOR_KEYS_PATH.read_text())
     assert keys["ids"] == [c["id"] for c in chunks]
-    assert len(keys["keys"]) == len(np.load(config.VECTORS_PATH, mmap_mode="r"))
+    vectors = np.load(config.VECTORS_PATH, mmap_mode="r")
+    assert len(keys["keys"]) == len(vectors)
+    # The load-time check the app runs: content keys, and the digest once
+    # embed.py has recorded one.
+    retrieve.check_alignment(chunks, vectors, keys)

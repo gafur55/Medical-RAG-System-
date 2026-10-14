@@ -1,15 +1,18 @@
 """Tests for src/retrieve.py - no embedding model, no real index.
 
 get_index() and embed_query() are swapped for a handful of 3-d unit
-vectors, so every ranking below can be checked by hand.
+vectors, so every ranking below can be checked by hand. The index checks
+at the bottom write their fake index files into tmp_path.
 """
 
 import json
+import subprocess
+import sys
 
 import numpy as np
 import pytest
 
-from src import config, retrieve
+from src import config, embed, retrieve
 
 
 def unit(*xs):
@@ -253,12 +256,21 @@ def test_minmax_and_fuse():
 
 
 # ---------------------------------------------------------------- index
+def key_file(chunks, vectors=None):
+    """vector_keys.json as embed.py writes it for chunks (and, given the
+    vectors, with their digest)."""
+    record = embed.keys_record(chunks, config.EMBEDDING_MODEL)
+    return embed.with_digest(record, vectors) if vectors is not None else record
+
+
 def test_check_alignment():
     chunks = [chunk("a"), chunk("b")]
     vectors = np.zeros((2, 3))
-    keys = {"embedding_model": config.EMBEDDING_MODEL, "ids": ["a", "b"], "keys": ["k1", "k2"]}
+    keys = key_file(chunks, vectors)
     retrieve.check_alignment(chunks, vectors, keys)        # fine
     retrieve.check_alignment(chunks, vectors, None)        # legacy, counts match
+    ids_only = {"embedding_model": config.EMBEDDING_MODEL, "ids": ["a", "b"]}
+    retrieve.check_alignment(chunks, vectors, ids_only)    # key file without keys or digest
 
     with pytest.raises(retrieve.IndexMismatch, match="python3 -m src.embed"):
         retrieve.check_alignment(chunks, vectors, {**keys, "ids": ["b", "a"]})
@@ -268,6 +280,44 @@ def test_check_alignment():
         retrieve.check_alignment(chunks, np.zeros((3, 3)), keys)
     with pytest.raises(retrieve.IndexMismatch, match="embedded with"):
         retrieve.check_alignment(chunks, vectors, {**keys, "embedding_model": "other/model"})
+    assert retrieve.alignment_problem(chunks, vectors, keys) is None
+    assert "row 0" in retrieve.alignment_problem(chunks, vectors, {**keys, "ids": ["b", "a"]})
+
+
+def test_check_alignment_catches_a_renamed_heading_with_unchanged_ids():
+    """A paginated source's chunk id hashes the page and the text, not the
+    heading path - but the embedded text starts with the headings. Rename
+    one, re-run ingest and forget embed: the ids still match vectors of the
+    old text, the content keys do not."""
+    before = [chunk("p3", "Tumor size matters.", page=3, source="cms", section=["Indications"])]
+    keys = key_file(before)
+    after = [dict(before[0], section=["Indications for Mohs"])]
+    retrieve.check_alignment(before, np.zeros((1, 3)), keys)
+    with pytest.raises(retrieve.IndexMismatch, match="different text.*row 0.*src.embed"):
+        retrieve.check_alignment(after, np.zeros((1, 3)), keys)
+
+
+def test_check_alignment_catches_a_toggled_section_headings_flag(monkeypatch):
+    chunks = [chunk("a"), chunk("s", page=2, source="sp", section=["Technique"])]
+    keys = key_file(chunks)
+    monkeypatch.setattr(config, "EMBED_SECTION_HEADINGS", False)
+    with pytest.raises(retrieve.IndexMismatch, match="EMBED_SECTION_HEADINGS.*row 1"):
+        retrieve.check_alignment(chunks, np.zeros((2, 3)), keys)
+
+
+def test_check_alignment_checks_the_vectors_digest():
+    """vectors.npy and vector_keys.json are written one after the other. A
+    run that dies in between, or restoring one file alone, leaves keys
+    that name the right chunks for rows that are not theirs."""
+    chunks = [chunk("a"), chunk("b")]
+    written = np.array([[1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    keys = key_file(chunks, written)
+    retrieve.check_alignment(chunks, written, keys)
+    retrieve.check_alignment(chunks, written.astype(np.float64), keys)   # same values
+    with pytest.raises(retrieve.IndexMismatch, match="not the file vector_keys.json"):
+        retrieve.check_alignment(chunks, written[::-1], keys)
+    # Key files from before the digest existed are still accepted.
+    retrieve.check_alignment(chunks, written[::-1], key_file(chunks))
 
 
 def test_get_index_raises_on_vector_keys_mismatch(tmp_path, monkeypatch):
@@ -281,6 +331,7 @@ def test_get_index_raises_on_vector_keys_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "VECTOR_KEYS_PATH", tmp_path / "vector_keys.json")
     monkeypatch.setattr(retrieve, "_chunks", None)
     monkeypatch.setattr(retrieve, "_vectors", None)
+    monkeypatch.setattr(retrieve, "_derived", {})
 
     with pytest.raises(retrieve.IndexMismatch, match="row 1"):
         retrieve.get_index()
@@ -288,6 +339,69 @@ def test_get_index_raises_on_vector_keys_mismatch(tmp_path, monkeypatch):
     (tmp_path / "vector_keys.json").unlink()        # legacy index: count check only
     loaded, vectors = retrieve.get_index()
     assert [c["id"] for c in loaded] == ["a", "b"] and vectors.shape == (2, 3)
+
+
+def test_get_index_rejects_vectors_restored_without_their_keys(tmp_path, monkeypatch):
+    chunks = [chunk("a"), chunk("b")]
+    (tmp_path / "chunks.json").write_text(json.dumps(chunks))
+    written = np.array([[1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    (tmp_path / "vector_keys.json").write_text(json.dumps(key_file(chunks, written)))
+    np.save(tmp_path / "vectors.npy", written[::-1])         # e.g. git restore vectors.npy
+    monkeypatch.setattr(config, "CHUNKS_PATH", tmp_path / "chunks.json")
+    monkeypatch.setattr(config, "VECTORS_PATH", tmp_path / "vectors.npy")
+    monkeypatch.setattr(config, "VECTOR_KEYS_PATH", tmp_path / "vector_keys.json")
+    monkeypatch.setattr(retrieve, "_chunks", None)
+    monkeypatch.setattr(retrieve, "_vectors", None)
+    monkeypatch.setattr(retrieve, "_derived", {})
+
+    with pytest.raises(retrieve.IndexMismatch, match="not the file vector_keys.json"):
+        retrieve.get_index()
+    np.save(tmp_path / "vectors.npy", written)
+    assert retrieve.get_index()[1].tolist() == written.tolist()
+
+
+def test_index_id_follows_ids_and_order():
+    assert retrieve.index_id(["a", "b"]) != retrieve.index_id(["b", "a"])
+    assert len(retrieve.index_id(["a"])) == 12
+    assert retrieve.index_id(["a", "b"]) == retrieve.index_id(["a", "b"])
+
+
+def test_loaded_index_id_names_the_index_in_memory(tmp_path, monkeypatch):
+    """The app loads the index once. Rebuilding the files while it runs
+    must not change the id its answers are stamped with."""
+    def write(chunks):
+        (tmp_path / "chunks.json").write_text(json.dumps(chunks))
+        vectors = np.zeros((len(chunks), 3), dtype=np.float32)
+        np.save(tmp_path / "vectors.npy", vectors)
+        (tmp_path / "vector_keys.json").write_text(json.dumps(key_file(chunks, vectors)))
+
+    monkeypatch.setattr(config, "CHUNKS_PATH", tmp_path / "chunks.json")
+    monkeypatch.setattr(config, "VECTORS_PATH", tmp_path / "vectors.npy")
+    monkeypatch.setattr(config, "VECTOR_KEYS_PATH", tmp_path / "vector_keys.json")
+    monkeypatch.setattr(retrieve, "_chunks", None)
+    monkeypatch.setattr(retrieve, "_vectors", None)
+    monkeypatch.setattr(retrieve, "_derived", {})
+
+    assert retrieve.loaded_index_id() is None                # nothing loaded yet
+    write([chunk("a"), chunk("b")])
+    retrieve.get_index()
+    assert retrieve.loaded_index_id() == retrieve.index_id(["a", "b"])
+
+    write([chunk("a"), chunk("b"), chunk("new", page=9)])    # ingest + embed elsewhere
+    retrieve.get_index()
+    assert retrieve.loaded_index_id() == retrieve.index_id(["a", "b"])
+
+
+def test_import_needs_no_model_or_registry():
+    """The HF Space imports retrieve (through generate). Checking content
+    keys and the digest brings in embed.py - which must stay light."""
+    code = ("import sys, src.retrieve; "
+            "print(sorted(m for m in ('sentence_transformers', 'yaml', 'src.sources', "
+            "'src.ingest', 'src.loaders') if m in sys.modules))")
+    out = subprocess.run([sys.executable, "-c", code], cwd=config.ROOT,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.strip().splitlines()[-1] == "[]"
 
 
 def test_chunk_field_defaults_for_old_records():

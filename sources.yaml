@@ -228,7 +228,8 @@ sources:
     notes: >-
       The billing and coding article that goes with your LCD (e.g. A57767
       for L33689, A57477 for L35494). Its long ICD-10 tables are skipped
-      (skip_tables) - they bury the prose rules in search results.
+      (skip_tables): tables are searched like prose, and these would bury
+      the prose rules in search results.
 
   # ---------------------------------------------------------------- NCI PDQ
   - id: pdq_skin_cancer_treatment_hp

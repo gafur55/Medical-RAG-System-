@@ -7,9 +7,10 @@ import hashlib
 import json
 import re
 
+import numpy as np
 import pytest
 
-from src import config, generate
+from src import config, generate, retrieve
 
 MANIFEST = {"index_id": "abc123def456", "sources": [
     {"id": "mohs_layers", "label": "Mohs textbook", "domain": "clinical"},
@@ -173,13 +174,50 @@ def test_numbered_prompt_states_the_rules():
     assert "different documents" in p and "disagree" in p
 
 
-def test_generation_config_names_style_and_version(no_manifest):
+@pytest.fixture
+def nothing_loaded(monkeypatch):
+    """No index in memory, whatever earlier tests loaded."""
+    monkeypatch.setattr(retrieve, "_chunks", None)
+    monkeypatch.setattr(retrieve, "_vectors", None)
+    monkeypatch.setattr(retrieve, "_derived", {})
+
+
+def test_generation_config_names_style_and_version(no_manifest, nothing_loaded):
     page = generate.generation_config("page")
     assert page == {**config.run_config(), "prompt_version": generate.PROMPT_VERSION}
     numbered = generate.generation_config("numbered", domains=("operations",))
     assert numbered["citation_style"] == "numbered"
     assert numbered["prompt_version"] == generate.prompt_version("numbered")
     assert numbered["retrieve_domains"] == ["operations"]
+
+
+def test_generation_config_names_the_index_actually_loaded(tmp_path, monkeypatch,
+                                                           nothing_loaded):
+    """The app loads the index once; manifest.json is re-read per answer.
+    Rebuild the index (ingest + embed) while the app runs and every later
+    answer, still retrieved from the old index, used to be logged under
+    the new index's ID."""
+    def build(ids):
+        chunks = [{"id": i, "book": "mohs_layers", "page": n, "kind": "prose",
+                   "text": f"text {i}", "figures": []} for n, i in enumerate(ids, start=1)]
+        (tmp_path / "chunks.json").write_text(json.dumps(chunks))
+        np.save(tmp_path / "vectors.npy", np.zeros((len(ids), 3), dtype=np.float32))
+        (tmp_path / "manifest.json").write_text(json.dumps(
+            {"index_id": retrieve.index_id(ids), "sources": []}))
+
+    monkeypatch.setattr(config, "CHUNKS_PATH", tmp_path / "chunks.json")
+    monkeypatch.setattr(config, "VECTORS_PATH", tmp_path / "vectors.npy")
+    monkeypatch.setattr(config, "VECTOR_KEYS_PATH", tmp_path / "vector_keys.json")   # none
+    monkeypatch.setattr(config, "MANIFEST_PATH", tmp_path / "manifest.json")
+
+    build(["a", "b"])
+    assert generate.generation_config()["index_id"] == config.index_id()   # nothing loaded
+    retrieve.get_index()
+    assert generate.generation_config()["index_id"] == retrieve.index_id(["a", "b"])
+
+    build(["a", "b", "statpearls:1"])                 # the rebuild, in another terminal
+    assert config.index_id() == retrieve.index_id(["a", "b", "statpearls:1"])
+    assert generate.generation_config()["index_id"] == retrieve.index_id(["a", "b"])
 
 
 def test_run_config_names_the_llm():

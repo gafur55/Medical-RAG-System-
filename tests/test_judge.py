@@ -332,10 +332,55 @@ def test_refusal_correct_only_defined_for_out_of_scope():
     ("A " + "long answer " * 30 + "(p. 12). The excerpts do not give a size limit.", False),
     # ...but the same phrase late in an uncited answer is.
     ("Well. " + "Some general words. " * 15 + "The excerpts do not cover this.", True),
+    # "determine" and "lacks" count only when tied to the material.
+    ("I cannot determine this from the provided excerpts.", True),
+    ("This cannot be determined from the retrieved passages.", True),
+    ("The provided context lacks information on dosing.", True),
+    ("There is not enough information to answer this question.", True),
+    ("No relevant information was found in the retrieved excerpts.", True),
+    ("Dosing is not addressed in the provided excerpts.", True),
+    # Ordinary clinical wording, cited, in the opening: not refusals.
+    ("The true extent of a basal cell carcinoma cannot be determined by clinical "
+     "examination alone (p. 12).", False),
+    ("The textbook notes that a full-thickness skin graft lacks structural support "
+     "(p. 133).", False),
+    ("In the context of the nasal tip, the skin lacks laxity (p. 141).", False),
+    ("In the context of the nasal tip, local flaps do not provide enough tissue (p. 141).",
+     False),
+    ("Sources of tension do not include the free margin (p. 12).", False),
+    ("A shave biopsy gives no information about depth of invasion (p. 45).", False),
+    ("Depth cannot be determined from the clinical context alone (p. 12).", False),
+    ("Exposed cartilage not covered in the first week heals by granulation (p. 160).", False),
 ])
 def test_refusal_detector(text, refused):
     n = len(judge.cited_pages(text)) + len(judge.cited_excerpts(text))
     assert judge.is_refusal(text, n) is refused
+
+
+def test_clinical_cannot_be_determined_is_not_a_refusal_downstream():
+    """Seen in review: a correct, cited answer opening with "cannot be
+    determined clinically" was counted as a refusal - flagged, triaged as a
+    generation fault and, on an out-of-scope question, hid a failed refusal."""
+    text = ("The true extent of a basal cell carcinoma cannot be determined by clinical "
+            "examination alone (p. 160), so Mohs maps the margins.")
+    in_scope = judge.deterministic_checks(fake_result(text), SITE)
+    assert in_scope["retrieval_hit"] is True
+    assert in_scope["refused"] is False and in_scope["refused_despite_relevant"] is False
+    r = row(1, "correct_complete")
+    r["checks"] = in_scope
+    s = judge.summarize([r])
+    assert s["flag_reasons"] == {} and s["triage"]["generation_fault"] == 0
+    assert s["refusal_detector_disagrees"] == []
+
+    answered = judge.deterministic_checks(fake_result(
+        "Dacarbazine response cannot be determined from staging alone; "
+        "use dacarbazine 1000 mg/m2 (p. 145)."), OOS)
+    assert answered["refused"] is False and answered["refusal_correct"] is False
+    r = row(14, "correct_complete", expected_refusal=True)
+    r["checks"] = answered
+    s = judge.summarize([r])
+    assert s["flag_reasons"] == {14: ["failed_refusal"]}
+    assert s["out_of_scope"]["refused"] == 0
 
 
 def test_retrieval_hit_by_gold_page_and_anchor():

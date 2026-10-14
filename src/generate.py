@@ -36,7 +36,7 @@ import sys
 
 from dotenv import load_dotenv
 
-from src import config
+from src import config, retrieve
 from src.retrieve import search
 
 load_dotenv()
@@ -287,10 +287,19 @@ def generation_config(style=None, domains=None):
     """run_config() plus the citation style and prompt version actually used
     - stamped on every answer, so a graded answer can always be traced to
     the model and prompt behind it. domains overrides retrieve_domains when
-    the caller filtered, so the record says what was really searched."""
+    the caller filtered, so the record says what was really searched.
+
+    index_id is the index this process searched (retrieve.loaded_index_id),
+    not the one manifest.json names now: the app keeps the index it loaded
+    at startup, so after ingest + embed in another terminal the manifest
+    would credit every later answer to a build it was not retrieved from.
+    Before any search has loaded an index, the manifest's ID stands."""
     style = resolve_style(style)
     cfg = {**config.run_config(), "citation_style": style,
            "prompt_version": prompt_version(style)}
+    loaded = retrieve.loaded_index_id()
+    if loaded is not None:
+        cfg["index_id"] = loaded
     if domains is not None:
         cfg["retrieve_domains"] = list(domains)
     return cfg

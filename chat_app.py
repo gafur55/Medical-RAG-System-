@@ -21,21 +21,26 @@ Run locally:
 Environment:
     MOHS_TEST_MODE=1        saved answers are marked is_test (kept out of grading)
     MOHS_SESSIONS_PATH=...  save records somewhere other than data/eval/sessions.jsonl
+                            (such a file is never synced with the HF dataset)
     MOHS_CHAT_USER=...      name stored as asked_by (default "chat user")
     MOHS_CHAT_PORT=...      port (default 7861; app.py uses 7860)
+Any of these, and HF_TOKEN / HF_DATASET, may also come from .env.
 """
 
 import os
 from datetime import datetime, timezone
-from pathlib import Path
 
 import gradio as gr
+from dotenv import load_dotenv
 
-from src import config, storage
-from src.generate import answer, groq_llm
+# storage reads HF_TOKEN, HF_DATASET and MOHS_SESSIONS_PATH - and pulls the
+# Hub copy - the moment it is imported, so .env has to be loaded first.
+# app.py gets this from importing src.generate (which loads .env) before
+# storage; here it is explicit, so reordering the imports cannot break it.
+load_dotenv()
 
-if os.environ.get("MOHS_SESSIONS_PATH"):
-    storage.SESSIONS_PATH = Path(os.environ["MOHS_SESSIONS_PATH"])
+from src import config, storage  # noqa: E402
+from src.generate import answer, groq_llm  # noqa: E402
 
 
 CONDENSE_PROMPT = """Rewrite the user's last message as one standalone question

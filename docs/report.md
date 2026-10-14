@@ -90,10 +90,17 @@ a clinician — treat its flags as "look at this", never as a verdict.
 **Surgeon activity** counts real records only. Answers made while testing
 the app (the test-mode checkbox, or an id in `data/eval/test_records.json`)
 are left out, the same rule the app's Grade and Summary tabs use. "New"
-means asked (or graded) after the previous report was written. Anything
-graded *Potentially harmful* or *Misleading* is listed with the surgeon's
-comment, and questions that are not in `questions.json` yet are listed as
-candidates for the eval set.
+means the previous report did not see it: a record whose id was not in
+the `sessions.jsonl` it read, or a grade it did not see on that record (a
+changed grade counts as new). Each report's `.json` keeps those record ids
+and `[id, grade]` pairs for the next one. Going by id rather than by time
+matters because grades arrive late (next section): a grade made on Monday
+and copied down on Wednesday is listed on Thursday, once. After a report
+from before these ids were kept, or for a record with no id, "new" falls
+back to asked (or graded) after the previous report was written. Anything
+newly graded *Potentially harmful* or *Misleading* is listed with the
+surgeon's comment, and new questions that are not in `questions.json` yet
+are listed as candidates for the eval set.
 
 ### The surgeon's grades live on the Hub
 

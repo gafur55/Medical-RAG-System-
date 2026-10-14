@@ -340,19 +340,34 @@ EXCERPT_GROUP_RE = re.compile(
 
 # A refusal names the excerpts as lacking the answer, or says it cannot
 # answer. Deliberately narrow: "the graft does not cover the defect" is a
-# clinical claim, not a refusal.
+# clinical claim, not a refusal. So every phrase is tied to the material the
+# model was given, or to answering itself. Mohs answers say "the extent
+# cannot be determined clinically", "a graft lacks support", "in the context
+# of a recurrence" and "sources of tension" - none of those is a refusal.
+# A false refusal is the costly direction: on an out-of-scope question it
+# hides an answer that should not have been given.
+_MATERIAL = (r"(?:excerpts?|passages?|sources?(?!\s+of\b)|context(?!\s+of\b)|textbook|book|"
+             r"provided (?:text|material))")
+_IN_MATERIAL = (r"(?:the\s+)?(?:(?:provided|given|retrieved|available|supplied)\s+)?"
+                rf"(?:{_MATERIAL}|text|material|information)\b")
+_CANNOT = r"\b(?:cannot|can't|can not|unable to)\s+"
 REFUSAL_RE = re.compile(
-    r"\b(?:excerpts?|passages?|sources?|context|textbook|book|provided (?:text|material))"
-    r"\b[^.]{0,60}?"
+    # the excerpts do not contain / give no / lack information on / are silent
+    rf"\b{_MATERIAL}\b[^.]{{0,60}}?"
     r"(?:\b(?:do(?:es)?|did)\s*n[o']t\s+(?:\w+\s+)?(?:contain|include|provide|address|"
     r"cover|mention|discuss|describe|specify|give|answer|offer|list|detail)"
     r"|\b(?:contains?|provides?|offers?|gives?|includes?) no\b"
-    r"|\blacks?\b|\b(?:is|are) silent\b)"
-    r"|\b(?:cannot|can't|can not|unable to)\s+(?:answer|be answered|provide an answer|"
-    r"determine|be determined)"
-    r"|\bno (?:relevant |specific )?information\b"
-    r"|\b(?:insufficient|not enough) information\b"
-    r"|\bnot (?:addressed|covered|discussed|mentioned|described) in the\b"
+    r"|\blacks?\s+(?:any\s+|specific\s+|the\s+)?(?:information|details?|data|answer|"
+    r"mention|discussion|guidance)\b"
+    r"|\b(?:is|are) silent\b)"
+    # I cannot answer; cannot be determined - but only from the excerpts
+    rf"|{_CANNOT}(?:answer|be answered|provide an answer)\b"
+    rf"|{_CANNOT}(?:determine|be determined)\b[^.]{{0,40}}?"
+    rf"\b(?:from|based on|using|in)\s+{_IN_MATERIAL}"
+    # no information in the excerpts / not enough information to answer
+    r"|\b(?:no|insufficient|not enough) (?:relevant |specific )?information\b[^.]{0,40}?"
+    rf"(?:\b(?:in|from|within)\s+{_IN_MATERIAL}|\bto answer\b)"
+    rf"|\bnot (?:addressed|covered|discussed|mentioned|described) in\s+{_IN_MATERIAL}"
     r"|\bnothing retrieved\b",
     re.I)
 REFUSAL_OPENING_CHARS = 250

@@ -173,6 +173,53 @@ def test_domain_filter_choices_for_two_domains(app_module, monkeypatch):
         ("Operations - coding, billing, policy", "operations")]
 
 
+def test_domain_filter_offers_only_what_config_searches(app_module, monkeypatch):
+    """The filter can narrow config.RETRIEVE_DOMAINS, never widen it - the
+    Ask tab must search what score.py and the sweep measure."""
+    use_manifest(monkeypatch, TEXTBOOK, NCCI)
+    monkeypatch.setattr(config, "RETRIEVE_DOMAINS", ("clinical",))
+    assert app_module.domain_choices() == []              # one left: no filter
+
+    research = {"id": "trials", "label": "Trials", "domain": "research"}
+    use_manifest(monkeypatch, TEXTBOOK, NCCI, research)
+    monkeypatch.setattr(config, "RETRIEVE_DOMAINS", ("clinical", "operations"))
+    assert app_module.domain_choices() == [
+        ("Clinical", "clinical"),
+        ("Operations - coding, billing, policy", "operations")]
+
+
+def test_domain_filter_hidden_in_the_ui_when_config_excludes_a_domain(app_module, monkeypatch):
+    """Two domains indexed but config searches one: no checkbox, and ask()
+    gets domains=None, so config decides - as score.py and chat_app do."""
+    def ask_inputs(module):
+        return next(fn.inputs for fn in module.demo.fns.values()
+                    if getattr(fn.fn, "__name__", "") == "ask")
+
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(config, "index_manifest", lambda: {"sources": [TEXTBOOK, NCCI]})
+            m.setattr(config, "RETRIEVE_DOMAINS", ("clinical",))
+            importlib.reload(app_module)
+            assert app_module.domain_filter is None
+            assert len(ask_inputs(app_module)) == 3
+    finally:
+        importlib.reload(app_module)
+
+
+def test_sources_without_chunks_are_not_offered(app_module, monkeypatch):
+    """A source whose loader found no text (a scanned PDF) is in the
+    manifest with n_chunks 0. Nothing of it can be retrieved, so neither
+    the disclaimer nor the filter may name it."""
+    use_manifest(monkeypatch, {**TEXTBOOK, "n_chunks": 1491}, {**NCCI, "n_chunks": 0})
+    assert app_module.indexed_sources() == [{**TEXTBOOK, "n_chunks": 1491}]
+    assert app_module.disclaimer() == ORIGINAL_DISCLAIMER
+    assert app_module.domain_choices() == []
+
+    use_manifest(monkeypatch, {**TEXTBOOK, "n_chunks": 1491}, {**NCCI, "n_chunks": 12})
+    assert "Searches 2 sources" in app_module.disclaimer()
+    assert len(app_module.domain_choices()) == 2
+
+
 def test_domain_filter_in_the_ui(app_module, monkeypatch):
     """Rebuild the UI against a two-domain index: the checkbox group is
     there, ticked for everything, and wired into ask(). With today's

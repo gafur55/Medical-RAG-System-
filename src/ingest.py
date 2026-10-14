@@ -21,15 +21,17 @@ Then: python3 -m src.embed           # re-embeds only new or changed chunks
 """
 
 import argparse
-import hashlib
 import json
 import re
 from datetime import datetime, timezone
 
-from src import chunking, config, embed, sources
+from src import chunking, config, embed, retrieve, sources
 # One definition of each, shared with chunking.py. They are the functions
 # ingest.py always used, so the textbook's chunk IDs do not change.
 from src.chunking import chunk_id, clean
+# Defined in retrieve.py so the app can compute it for the index it loaded
+# without importing this module (and the registry); unchanged from here.
+from src.retrieve import index_id
 
 
 CAPTION_RE = re.compile(r"^(Fig\.?|Figure|Table|Video)\b", re.IGNORECASE)
@@ -204,12 +206,28 @@ def _locator(piece):
     return piece["section"][-1] if piece["section"] else ""
 
 
+def _place_in_id(piece, locator):
+    """What chunk_id() hashes besides the source and the text: the page for
+    paginated sources, else the full section path ("BCC > Cryosurgery").
+
+    Not the locator alone: that is only the innermost heading, and a guide
+    repeats subsection names - NCI's PDQ page has "Cryosurgery" under both
+    BCC and SCC, with the same contraindication list - so the same text
+    under two different sections would share an ID. A piece with no section
+    path falls back to its locator. Textbook IDs (build_chunks) and
+    paginated PDF IDs do not change.
+    """
+    if piece["page"] is not None:
+        return piece["page"]
+    return " > ".join(piece["section"]) or locator
+
+
 def chunk_records(source, pieces):
     """chunking.pack() output -> chunk records for chunks.json. Pure.
 
-    The ID hashes the page for paginated sources and the locator (a section
-    name) for the rest, so the same paragraph under a different heading is
-    a different chunk. `book` repeats the source ID for readers written
+    The ID hashes the page for paginated sources and the section path for
+    the rest (_place_in_id), so the same paragraph under a different heading
+    is a different chunk. `book` repeats the source ID for readers written
     before the multi-source index.
     """
     records = []
@@ -217,7 +235,7 @@ def chunk_records(source, pieces):
         page = piece["page"]
         locator = _locator(piece)
         records.append({
-            "id": chunk_id(source.id, page if page is not None else locator, piece["text"]),
+            "id": chunk_id(source.id, _place_in_id(piece, locator), piece["text"]),
             "book": source.id,
             "source": source.id,
             "domain": source.domain,
@@ -250,8 +268,8 @@ def duplicate_ids(chunks):
     """One message per chunk whose ID was already used. Pure.
 
     A duplicate means the same text twice at the same place in the same
-    source (an ID hashes source, page/locator and text). Two rows with one
-    ID would make every id-based lookup ambiguous, so ingest refuses.
+    source (an ID hashes source, page/section path and text). Two rows with
+    one ID would make every id-based lookup ambiguous, so ingest refuses.
     """
     first, problems = {}, []
     for c in chunks:
@@ -262,12 +280,6 @@ def duplicate_ids(chunks):
                 f"{c.get('locator') or c.get('page')!r} repeats the text "
                 f"{c['text'][:60]!r}")
     return problems
-
-
-def index_id(ids):
-    """12 hex chars naming one build: changes when any chunk ID or the order
-    changes. Logged with every answer and score run."""
-    return hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()[:12]
 
 
 def kind_counts(chunks):
@@ -375,25 +387,30 @@ def abbreviate(text, width=36):
     return first if len(first) <= width else first[:width - 3].rstrip() + "..."
 
 
-def vector_problem(chunk_ids, key_ids, n_vectors):
+def vector_problem(chunks, vectors, keys):
     """Whether vectors.npy still matches chunks.json, as a message or None.
 
-    key_ids are the ids in vector_keys.json (None if there is none);
-    n_vectors is the row count of vectors.npy (None if there is none).
+    chunks: chunks.json (None if there is none); vectors: vectors.npy, a
+    memory map is enough (None if there is none); keys: vector_keys.json
+    (None if there is none).
+
+    With a key file this is retrieve.alignment_problem() - the very check
+    the app and score.py run when they load the index - so --list cannot
+    report "no problems" for an index they refuse: a changed embedding
+    model, a row count that differs from the key file, stale content keys
+    or a vectors.npy the key file was not written with.
     """
-    if chunk_ids is None:
+    if chunks is None:
         return None
-    if n_vectors is None:
+    if vectors is None:
         return "no vectors.npy - run: python3 -m src.embed"
-    if key_ids is None:
-        if n_vectors != len(chunk_ids):
-            return (f"vectors.npy has {n_vectors} rows for {len(chunk_ids)} chunks - "
+    if keys is None:
+        if len(vectors) != len(chunks):
+            return (f"vectors.npy has {len(vectors)} rows for {len(chunks)} chunks - "
                     "run: python3 -m src.embed")
         return ("no vector_keys.json yet (index built before the registry) - "
                 f"run: {REBUILD}")
-    if key_ids != chunk_ids:
-        return "vectors.npy is out of date with chunks.json - run: python3 -m src.embed"
-    return None
+    return retrieve.alignment_problem(chunks, vectors, keys)
 
 
 def format_status(registry, manifest, present, extra_problems=()):
@@ -456,14 +473,12 @@ def status_report(registry):
     present = {s.id: s.available for s in registry}
     chunks = _read_json(config.CHUNKS_PATH)
     keys = _read_json(config.VECTOR_KEYS_PATH)
-    n_vectors = None
+    vectors = None
     if config.VECTORS_PATH.exists():
         import numpy as np
-        n_vectors = len(np.load(config.VECTORS_PATH, mmap_mode="r"))
-    vectors = vector_problem(
-        [c["id"] for c in chunks] if chunks is not None else None,
-        keys.get("ids") if keys else None, n_vectors)
-    return format_status(registry, _read_json(config.MANIFEST_PATH), present, [vectors])
+        vectors = np.load(config.VECTORS_PATH, mmap_mode="r")
+    problem = vector_problem(chunks, vectors, keys)
+    return format_status(registry, _read_json(config.MANIFEST_PATH), present, [problem])
 
 
 def main(argv=None):
