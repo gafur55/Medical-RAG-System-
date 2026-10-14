@@ -1,0 +1,26 @@
+{
+  "note": "Session records made while testing the app. storage.real_records() leaves these out of the Grade queue and the Summary; sessions.jsonl itself is untouched. Seeded with every record that existed on 2026-10-13 (all asked or graded during development, with placeholder comments). Remove an id to count that record again.",
+  "ids": [
+    "20260819032814826418",
+    "20260819033040676994",
+    "20260819033859313400",
+    "20260819034702829752",
+    "20260819034731307571",
+    "20260819034745583016",
+    "20260819070026136966",
+    "20260819070031652838",
+    "20260819070045660716",
+    "20260819070128042140",
+    "20260819160535780538",
+    "20260820020503874456",
+    "20260820020531559476",
+    "20260820020624222708",
+    "20260820020744509039",
+    "20260820020755205134",
+    "20260820160721934894",
+    "20260820161303586574",
+    "20260820161534506473",
+    "20260820161632293696",
+    "20260820164644791452"
+  ]
+}

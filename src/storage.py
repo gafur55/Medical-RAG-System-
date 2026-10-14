@@ -13,6 +13,12 @@ Set two secrets in the Space:
     HF_DATASET   - e.g. "gafur55/mohs-sessions"
 
 With neither set, this falls back to local-file-only and prints a warning.
+
+Test records: answers produced while testing the app should never reach the
+surgeon's grading queue or the summary numbers. A record counts as a test if
+it carries "is_test": true (the app's test-mode checkbox), or if its id is
+listed in data/eval/test_records.json. Nothing is ever deleted - the records
+stay exactly as written, and un-flagging one is removing its id from the list.
 """
 
 import json
@@ -22,6 +28,7 @@ import threading
 from src import config
 
 SESSIONS_PATH = config.EVAL_DIR / "sessions.jsonl"
+TEST_IDS_PATH = config.EVAL_DIR / "test_records.json"
 
 HF_TOKEN = os.environ.get("HF_TOKEN")
 HF_DATASET = os.environ.get("HF_DATASET")
@@ -92,6 +99,28 @@ def load_records():
     if not SESSIONS_PATH.exists():
         return []
     return [json.loads(l) for l in SESSIONS_PATH.read_text().splitlines() if l.strip()]
+
+
+def test_record_ids():
+    """Record ids listed in data/eval/test_records.json (empty if no file)."""
+    if not TEST_IDS_PATH.exists():
+        return set()
+    return set(json.loads(TEST_IDS_PATH.read_text()).get("ids", []))
+
+
+def is_test(record, test_ids=None):
+    """True for answers made while testing the app. Pass test_ids when
+    checking many records, so the file is read once rather than per record."""
+    if record.get("is_test"):
+        return True
+    ids = test_record_ids() if test_ids is None else test_ids
+    return record.get("id") in ids
+
+
+def real_records():
+    """Every record except test ones - what Grade and Summary should see."""
+    ids = test_record_ids()
+    return [r for r in load_records() if not is_test(r, ids)]
 
 
 def append_record(record):

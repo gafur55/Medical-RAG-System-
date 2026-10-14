@@ -18,13 +18,14 @@ afterwards.
 """
 
 import json
+import os
 from datetime import datetime, timezone
 
 import gradio as gr
 
 from src import config
 from src.generate import answer
-from src.storage import append_record, load_records, update_record
+from src.storage import append_record, real_records, update_record
 
 try:
     import spaces
@@ -85,7 +86,9 @@ def _unused_gpu_stub():
     return None
 
 # --------------------------------------------------------------- ask tab
-def ask(question, name):
+def ask(question, name, test_mode=False):
+    """test_mode: the record is saved with is_test=True, so it never reaches
+    the Grade queue or the Summary numbers."""
     if not valid_name(name):
         return "Enter your full name at the top before asking.", "", [], ""
 
@@ -106,6 +109,7 @@ def ask(question, name):
         "figures": result["figures"],
         "config": result["config"],
         "grade": None,
+        "is_test": bool(test_mode),
     }
     append_record(record)
 
@@ -138,8 +142,11 @@ def next_ungraded():
     Returns 7 values: three display panels, the record id, then blanks for
     the two radios and the comment box. Clearing matters - a leftover
     selection could be saved again without the grader noticing.
+
+    Test records (see storage.is_test) are skipped - they are not the
+    surgeon's to grade.
     """
-    records = load_records()
+    records = real_records()
     ungraded = [r for r in records if not r.get("grade")]
     graded = len(records) - len(ungraded)
 
@@ -184,7 +191,7 @@ def save_grade(record_id, grade, citation_check, comment, name):
 
 # ----------------------------------------------------------- summary tab
 def summary():
-    records = [r for r in load_records() if r.get("grade")]
+    records = [r for r in real_records() if r.get("grade")]
     if not records:
         return "No grades yet."
 
@@ -311,9 +318,18 @@ with gr.Blocks(title="Mohs reconstruction reference") as demo:
         with gr.Accordion("Passages the model was shown", open=False):
             passages_md = gr.Markdown(PLACEHOLDER_PASSAGES, elem_id="passages_panel")
 
+        # For whoever is testing the app, not the surgeon - so it sits
+        # collapsed at the bottom. MOHS_TEST_MODE=1 in .env ticks it by
+        # default on a development machine.
+        with gr.Accordion("Testing", open=False):
+            test_mode = gr.Checkbox(
+                label="Test mode - keep this answer out of grading and the summary",
+                value=os.environ.get("MOHS_TEST_MODE") == "1",
+            )
+
         ask_btn.click(
             ask,
-            inputs=[question, name],
+            inputs=[question, name, test_mode],
             outputs=[answer_md, citations_md, figures_gallery, passages_md],
         )
 
