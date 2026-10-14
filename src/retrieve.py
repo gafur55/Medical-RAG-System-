@@ -1,8 +1,8 @@
 """Search the index.
 
-This is the ONE place retrieval happens. eval/score.py, generate.py and any
-future app all call search() - so an improvement here shows up everywhere,
-and what you measure cannot drift from what you ship.
+This is the ONE place retrieval happens. score.py, prep.py and generate.py
+(and through it the app) all call search() - so an improvement here shows up
+everywhere, and what you measure cannot drift from what you ship.
 
 Run:  python3 -m src.retrieve "Karapandzic flap"
 """

@@ -1,7 +1,7 @@
 """Build the review sheet, and read your ticks back in.
 
-  python3 -m src.eval.prep              # write data/eval/review_sheet.md
-  python3 -m src.eval.prep --harvest    # read your ticks -> gold_pages
+  python3 -m src.prep              # write data/eval/review_sheet.md
+  python3 -m src.prep --harvest    # read your ticks -> gold_pages
 
 Workflow:
   1. Run without --harvest. Writes review_sheet.md with the top 25 search
@@ -62,7 +62,7 @@ def write_sheet():
     n = sum(1 for q in questions if q["type"] != "out_of_scope")
     print(f"wrote {config.REVIEW_SHEET_PATH}")
     print(f"  {n} questions x {config.REVIEW_POOL} results")
-    print("Tick the good ones, then: python3 -m src.eval.prep --harvest")
+    print("Tick the good ones, then: python3 -m src.prep --harvest")
 
 
 def parse_marks(text):
@@ -91,7 +91,7 @@ def harvest():
     reading is most of the value of this exercise.
     """
     if not config.REVIEW_SHEET_PATH.exists():
-        print("No review sheet. Run: python3 -m src.eval.prep")
+        print("No review sheet. Run: python3 -m src.prep")
         return
 
     found = parse_marks(config.REVIEW_SHEET_PATH.read_text())
@@ -116,7 +116,7 @@ def harvest():
 
     config.QUESTIONS_PATH.write_text(json.dumps(questions, indent=2))
     print(f"\nupdated {config.QUESTIONS_PATH}")
-    print("Now add gold_anchors by hand, then: python3 -m src.eval.score")
+    print("Now add gold_anchors by hand, then: python3 -m src.score")
 
 
 if __name__ == "__main__":

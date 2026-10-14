@@ -1,6 +1,6 @@
 """Measure retrieval quality.
 
-  python3 -m src.eval.score --note "baseline"
+  python3 -m src.score --note "baseline"
 
 Ground truth is gold_pages and gold_anchors in questions.json - pages and
 phrases, not chunk IDs, so the labels survive any chunking change.

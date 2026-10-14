@@ -29,8 +29,7 @@ and a folder of extracted figure images.
 ## Run
 
 ```bash
-cd src
-python3 ingest.py
+python3 -m src.ingest      # from the project root
 ```
 
 Output on the Mohs textbook (608 pages):
@@ -148,8 +147,8 @@ are tuned to this textbook and will likely need adjusting for a second one.
 ## Tests
 
 ```bash
-cd ..
-python3 -m tests.test_ingest
+python3 -m tests.test_ingest   # this file only, no pytest needed
+python3 -m pytest              # every test in tests/
 ```
 
 30 assertions covering `clean`, `chunk_id`, `classify` and

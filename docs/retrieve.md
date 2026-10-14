@@ -1,8 +1,8 @@
 # Retrieval — `src/retrieve.py`
 
 Takes a question, returns the top-k chunks. This is the **only** place
-retrieval happens — `eval/score.py`, `generate.py` and any future app all
-call `search()`.
+retrieval happens — `score.py`, `prep.py` and `generate.py` (and through it
+the app) all call `search()`.
 
 ```
         question
@@ -124,9 +124,9 @@ produced them.
 Workflow:
 
 ```bash
-python3 -m src.eval.score --note "baseline, prefix on"
+python3 -m src.score --note "baseline, prefix on"
 # edit config.py: USE_QUERY_PREFIX = False
-python3 -m src.eval.score --note "prefix off"
+python3 -m src.score --note "prefix off"
 ```
 
 Then compare the two lines in `results.jsonl`. **One knob at a time** — change
