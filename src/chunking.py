@@ -36,6 +36,11 @@ def clean(text):
     return " ".join(text.split())
 
 
+def clean_lines(text):
+    """clean() each line, drop empty lines, keep the line breaks."""
+    return "\n".join(clean(line) for line in text.splitlines() if line.strip())
+
+
 def chunk_id(book_id, page, text):
     """Content-derived name for a chunk: same text -> same ID, always.
 
@@ -188,7 +193,10 @@ def pack(units, target_chars=1000, overlap_chars=150, min_chars=50):
             for text in _pack_prose(prose, target_chars, overlap_chars, min_chars):
                 emit(text, "prose")
             prose = []
-            text = clean(unit.text)
+            # Tables keep one row per line - "a | b" rows flattened into one
+            # line are unreadable in the passages panel.
+            text = (clean_lines(unit.text) if unit.kind == "table"
+                    else clean(unit.text))
             if len(text) >= min_chars:
                 emit(text, unit.kind)
         for text in _pack_prose(prose, target_chars, overlap_chars, min_chars):

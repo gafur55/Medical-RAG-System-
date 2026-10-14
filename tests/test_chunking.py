@@ -126,3 +126,11 @@ def test_pack_does_not_lose_a_short_leading_paragraph():
     chunks = pack(units, target_chars=1000, overlap_chars=0, min_chars=50)
     assert len("CPT 17311 applies.") + 1 + len(long_para) > 1000
     assert any("CPT 17311 applies." in c["text"] for c in chunks)
+
+
+def test_table_rows_keep_their_line_breaks():
+    table = Unit("Code | Rule\n17311  |  first stage\n\n17312 | each additional stage",
+                 section=("Billing",), kind="table")
+    (chunk,) = pack([table], min_chars=10)
+    assert chunk["kind"] == "table"
+    assert chunk["text"] == "Code | Rule\n17311 | first stage\n17312 | each additional stage"

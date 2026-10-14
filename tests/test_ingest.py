@@ -4,6 +4,8 @@ No pytest needed:  python -m tests.test_ingest
 
 The four functions tested here are pure - same input, same output, no file
 access - which is exactly why they were split out of the main loop.
+Building the multi-source index and incremental embedding are tested in
+tests/test_index.py (plain pytest).
 """
 
 from src.ingest import chunk_id, classify, clean, nearest_figure_above
@@ -128,8 +130,9 @@ def test_real_output():
     chunks = json.loads(config.CHUNKS_PATH.read_text())
     ids = [c["id"] for c in chunks]
     check("all IDs unique", len(ids), len(set(ids)))
+    # "table" comes from the non-textbook loaders (see chunking.py)
     check("all kinds valid",
-          set(c["kind"] for c in chunks) <= {"prose", "caption", "reference"}, True)
+          set(c["kind"] for c in chunks) <= {"prose", "caption", "reference", "table"}, True)
     check("only captions carry figures",
           all(c["kind"] == "caption" for c in chunks if c["figures"]), True)
 

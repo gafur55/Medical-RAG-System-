@@ -1,0 +1,19 @@
+{
+ "index_id": "f972e1512122",
+ "built_at": "2026-10-14T03:08:14+00:00",
+ "n_chunks": 1491,
+ "sources": [
+  {
+   "id": "mohs_layers",
+   "label": "Mohs textbook",
+   "title": "Mohs Micrographic Surgery: From Layers to Reconstruction",
+   "type": "textbook",
+   "domain": "clinical",
+   "format": "pdf_textbook",
+   "license": "Copyrighted. Licensed copy for local use - never commit the PDF or publish its text.",
+   "url": "",
+   "year": null,
+   "n_chunks": 1491
+  }
+ ]
+}
